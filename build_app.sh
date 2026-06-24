@@ -17,28 +17,38 @@ fi
 
 rm -rf "$DEST"
 mkdir -p "$DEST/Contents/MacOS"
-mkdir -p "$DEST/Contents/Resources"
+mkdir -p "$DEST/Contents/Resources/pyhome"
 
 cp "$DIR/AppIcon.icns" "$DEST/Contents/Resources/AppIcon.icns"
 
-cat > "$DEST/Contents/MacOS/$APP_NAME" << LAUNCHER
-#!$DIR/.venv/bin/python3
-# NOTE: this file's shebang line IS the interpreter — there is no zsh
-# wrapper and no runtime exec() call. macOS 26 has a confirmed bug
-# (FB21015611) where, if a bundle's main executable is a script that
-# itself calls exec() to swap to a different process image *after*
-# starting, the NSStatusItem never renders when launched via
-# Finder/LaunchServices. A shebang is resolved by the kernel in a single
-# execve before any of our code runs, so it does not trigger that bug —
-# this is what lets the menu bar icon work from a normal Finder/Spotlight
-# launch.
-import sys, runpy
-sys.path.insert(0, "$DIR")
-runpy.run_path("$DIR/app.py", run_name="__main__")
-LAUNCHER
+# --- Resolve the real venv interpreter + its stdlib home + site-packages ---
+# We COPY (not symlink, not a zsh/shebang wrapper) the actual python3.12
+# binary into Contents/MacOS/Lyrebird. Two things this buys us:
+#  1. No exec() call happens after the process starts (LaunchServices execs
+#     this Mach-O binary directly) — avoids the confirmed macOS 26 bug
+#     (FB21015611) where NSStatusItem never renders if the bundle's main
+#     executable swaps process image via exec() after launch.
+#  2. Activity Monitor / the mic permission prompt show "Lyrebird" instead
+#     of "Python", because that's now literally the binary's own name.
+PY_REAL_BIN="$(readlink -f "$DIR/.venv/bin/python3" 2>/dev/null || python3 -c "import os,sys; print(os.path.realpath('$DIR/.venv/bin/python3'))")"
+PY_BASE_PREFIX="$("$DIR/.venv/bin/python3" -c 'import sys; print(sys.base_prefix)')"
+PY_SITE_PACKAGES="$("$DIR/.venv/bin/python3" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+
+cp "$PY_REAL_BIN" "$DEST/Contents/MacOS/$APP_NAME"
 chmod +x "$DEST/Contents/MacOS/$APP_NAME"
 
-cat > "$DEST/Contents/Info.plist" << 'PLIST'
+# sitecustomize.py runs automatically on interpreter startup (Python's
+# `site` module imports it if its directory is on PYTHONPATH) — this is
+# what makes the renamed binary actually run app.py instead of dropping
+# into a bare REPL. It only fires for THIS bundle: PYTHONPATH below is set
+# via LSEnvironment, so it's never on sys.path for normal `python app.py`
+# runs from Terminal.
+cat > "$DEST/Contents/Resources/pyhome/sitecustomize.py" << PYEOF
+import runpy
+runpy.run_path("$DIR/app.py", run_name="__main__")
+PYEOF
+
+cat > "$DEST/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -55,6 +65,11 @@ cat > "$DEST/Contents/Info.plist" << 'PLIST'
   <key>LSMinimumSystemVersion</key>    <string>12.0</string>
   <key>NSMicrophoneUsageDescription</key>
     <string>Lyrebird necesita acceso al micrófono para transcribir tu voz.</string>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>PYTHONHOME</key> <string>$PY_BASE_PREFIX</string>
+    <key>PYTHONPATH</key> <string>$DEST/Contents/Resources/pyhome:$PY_SITE_PACKAGES:$DIR</string>
+  </dict>
 </dict>
 </plist>
 PLIST
