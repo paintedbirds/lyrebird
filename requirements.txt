@@ -1,0 +1,13 @@
+# Local Whisper transcription (pulls in torch)
+openai-whisper
+
+# Native menu bar app + floating pill window
+pyobjc-framework-Cocoa
+
+# Microphone recording + WAV writing
+sounddevice
+scipy
+numpy
+
+# Per-phrase voice-activity detection for mixed-language (EN/ES) transcription
+silero-vad
