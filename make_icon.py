@@ -11,16 +11,18 @@ import tempfile
 from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyProhibited,
+    NSBezierPath,
     NSBitmapImageRep,
     NSColor,
-    NSCompositingOperationSourceAtop,
     NSCompositingOperationSourceOver,
+    NSGradient,
+    NSGraphicsContext,
     NSImage,
-    NSImageSymbolConfiguration,
     NSMakeRect,
+    NSMakeSize,
     NSPNGFileType,
     NSRectFill,
-    NSRectFillUsingOperation,
+    NSShadow,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,32 +31,48 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def render_png(pixel_size: int) -> bytes:
     img = NSImage.alloc().initWithSize_((pixel_size, pixel_size))
     img.lockFocus()
+    ctx = NSGraphicsContext.currentContext()
 
+    # Transparent canvas (rounded corners show through).
     NSColor.clearColor().set()
     NSRectFill(NSMakeRect(0, 0, pixel_size, pixel_size))
 
-    sym = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-        "mic.circle.fill", "Lyrebird"
-    )
-    if sym is not None:
-        cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_scale_(
-            float(pixel_size), 6, 3
-        )
-        sym = sym.imageWithSymbolConfiguration_(cfg)
-        sym_size = sym.size()
+    # --- Blue-gradient squircle background (macOS app-icon proportions).
+    margin = pixel_size * 0.085
+    side = pixel_size - 2 * margin
+    radius = side * 0.2237
+    rect = NSMakeRect(margin, margin, side, side)
+    bg = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, radius, radius)
+
+    top = NSColor.colorWithSRGBRed_green_blue_alpha_(0.42, 0.66, 1.00, 1.0)
+    bottom = NSColor.colorWithSRGBRed_green_blue_alpha_(0.09, 0.26, 0.78, 1.0)
+    grad = NSGradient.alloc().initWithStartingColor_endingColor_(top, bottom)
+    grad.drawInBezierPath_angle_(bg, -90.0)  # top -> bottom
+
+    # --- White bird logo with a soft drop shadow, centered.
+    ctx.saveGraphicsState()
+    shadow = NSShadow.alloc().init()
+    shadow.setShadowColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(0, 0, 0, 0.32))
+    shadow.setShadowOffset_(NSMakeSize(0, -pixel_size * 0.012))
+    shadow.setShadowBlurRadius_(pixel_size * 0.03)
+    shadow.set()
+
+    bird = NSImage.alloc().initWithContentsOfFile_(os.path.join(HERE, "icon-app.svg"))
+    if bird is not None:
+        nat = bird.size()
+        target_h = side * 0.56
+        scale = target_h / nat.height if nat.height else 1.0
+        target_w = nat.width * scale
         dest = NSMakeRect(
-            (pixel_size - sym_size.width) / 2,
-            (pixel_size - sym_size.height) / 2,
-            sym_size.width,
-            sym_size.height,
+            margin + (side - target_w) / 2,
+            margin + (side - target_h) / 2,
+            target_w,
+            target_h,
         )
-        sym.drawInRect_fromRect_operation_fraction_(
+        bird.drawInRect_fromRect_operation_fraction_(
             dest, NSMakeRect(0, 0, 0, 0), NSCompositingOperationSourceOver, 1.0
         )
-        NSColor.colorWithSRGBRed_green_blue_alpha_(0.20, 0.55, 1.0, 1.0).set()
-        NSRectFillUsingOperation(
-            NSMakeRect(0, 0, pixel_size, pixel_size), NSCompositingOperationSourceAtop
-        )
+    ctx.restoreGraphicsState()
 
     img.unlockFocus()
 

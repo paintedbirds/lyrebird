@@ -1,9 +1,9 @@
-"""Whisper Menu Bar - 100% local speech-to-text for macOS.
+"""Lyrebird - 100% local speech-to-text for macOS.
 
 Tap the menu bar icon to start listening; a floating pill stays pinned on top
 while you keep working. Click the check to finish (transcribe + auto-copy) or
 the X to cancel. Right-click the icon for Settings, History, file transcription,
-and Quit. Everything runs locally via OpenAI Whisper.
+and Quit. Everything runs on-device.
 
 Built natively with AppKit/PyObjC so the menu bar item, the pill, and the
 settings window share one Cocoa event loop.
@@ -419,7 +419,7 @@ class AppController(NSObject):
 
         menu.addItem_(NSMenuItem.separatorItem())
 
-        # --- Microphone submenu (inline, like SuperWhisper)
+        # --- Microphone submenu (inline)
         devices = [DEFAULT_MIC] + [name for _i, name in list_input_devices()]
         saved_device = self.store.get("device")
         current_mic = saved_device if saved_device in devices else DEFAULT_MIC
@@ -886,28 +886,31 @@ class AppController(NSObject):
     def _build_settings_history_section(self, cw, H):
         sec = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, cw, H))
 
+        PAD = 24
+
         title_lbl = NSTextField.labelWithString_("History")
-        title_lbl.setFrame_(NSMakeRect(20, H - 52, cw - 40, 28))
-        title_lbl.setFont_(NSFont.boldSystemFontOfSize_(18))
+        title_lbl.setFrame_(NSMakeRect(PAD, H - 66, cw - PAD * 2, 26))
+        title_lbl.setFont_(NSFont.boldSystemFontOfSize_(20))
         title_lbl.setTextColor_(NSColor.labelColor())
         sec.addSubview_(title_lbl)
 
-        sub_lbl = NSTextField.labelWithString_("Last 5 transcriptions. Click any card to copy.")
-        sub_lbl.setFrame_(NSMakeRect(20, H - 76, cw - 40, 18))
+        sub_lbl = NSTextField.labelWithString_("Your last 5 transcriptions. Click any to copy.")
+        sub_lbl.setFrame_(NSMakeRect(PAD, H - 86, cw - PAD * 2, 16))
         sub_lbl.setFont_(NSFont.systemFontOfSize_(12))
         sub_lbl.setTextColor_(NSColor.secondaryLabelColor())
         sec.addSubview_(sub_lbl)
 
-        clear_btn = NSButton.alloc().initWithFrame_(NSMakeRect(20, 10, 120, 28))
+        clear_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD, 16, 120, 28))
         clear_btn.setTitle_("Clear History")
         clear_btn.setBezelStyle_(1)  # NSRoundedBezelStyle
         clear_btn.setTarget_(self)
         clear_btn.setAction_("clearHistory:")
         sec.addSubview_(clear_btn)
+        self._clearHistBtn = clear_btn
 
-        # Cards container
+        # Cards container, between the subtitle and the clear button
         self._hist_container = NSView.alloc().initWithFrame_(
-            NSMakeRect(16, 48, cw - 32, H - 108)
+            NSMakeRect(PAD, 56, cw - PAD * 2, H - 152)
         )
         sec.addSubview_(self._hist_container)
 
@@ -917,10 +920,12 @@ class AppController(NSObject):
     def _build_settings_about_section(self, cw, H):
         sec = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, cw, H))
 
+        # Hero block (icon + name + version) and the info card are centered as
+        # one group so the section doesn't leave an empty bottom half.
         # Icon
-        icon_img = self._load_svg_icon(48)
+        icon_img = self._load_svg_icon(52)
         if icon_img:
-            icon_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw // 2 - 24, H - 96, 48, 48))
+            icon_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw // 2 - 26, 318, 52, 52))
             icon_btn.setBordered_(False)
             icon_btn.setImage_(icon_img)
             icon_btn.setImagePosition_(NSImageOnly)
@@ -928,35 +933,34 @@ class AppController(NSObject):
             sec.addSubview_(icon_btn)
 
         name_lbl = NSTextField.labelWithString_("Lyrebird")
-        name_lbl.setFrame_(NSMakeRect(0, H - 124, cw, 24))
+        name_lbl.setFrame_(NSMakeRect(0, 278, cw, 26))
         name_lbl.setAlignment_(NSTextAlignmentCenter)
-        name_lbl.setFont_(NSFont.boldSystemFontOfSize_(18))
+        name_lbl.setFont_(NSFont.boldSystemFontOfSize_(20))
         name_lbl.setTextColor_(NSColor.labelColor())
         sec.addSubview_(name_lbl)
 
         ver_lbl = NSTextField.labelWithString_("Version 1.0  ·  100% local speech-to-text")
-        ver_lbl.setFrame_(NSMakeRect(0, H - 148, cw, 18))
+        ver_lbl.setFrame_(NSMakeRect(0, 258, cw, 18))
         ver_lbl.setAlignment_(NSTextAlignmentCenter)
         ver_lbl.setFont_(NSFont.systemFontOfSize_(12))
         ver_lbl.setTextColor_(NSColor.secondaryLabelColor())
         sec.addSubview_(ver_lbl)
 
         # Info card
-        info_card = self._settings_glass_card(sec, 16, H - 280, cw - 32, 120)
+        info_card = self._settings_glass_card(sec, 24, 118, cw - 48, 100)
         for i, (label, value) in enumerate([
             ("Hotkey", "⇧⌘L  start / stop recording"),
             ("Right-click icon", "Language, history, settings, quit"),
-            ("Model cache", "~/.cache/whisper"),
             ("Config", "~/Library/Application Support/Lyrebird"),
         ]):
-            row_y = 120 - 28 - i * 26
+            row_y = 100 - 26 - i * 26
             lbl = NSTextField.labelWithString_(label)
             lbl.setFrame_(NSMakeRect(16, row_y, 130, 18))
             lbl.setFont_(NSFont.systemFontOfSize_(11))
             lbl.setTextColor_(NSColor.secondaryLabelColor())
             info_card.addSubview_(lbl)
             val = NSTextField.labelWithString_(value)
-            val.setFrame_(NSMakeRect(150, row_y, cw - 182, 18))
+            val.setFrame_(NSMakeRect(150, row_y, cw - 48 - 150 - 16, 18))
             val.setFont_(NSFont.systemFontOfSize_(11))
             val.setTextColor_(NSColor.labelColor())
             info_card.addSubview_(val)
@@ -1243,13 +1247,39 @@ class AppController(NSObject):
         container_h = self._hist_container.frame().size.height
         card_h, gap = 68, 10
 
+        if getattr(self, "_clearHistBtn", None) is not None:
+            self._clearHistBtn.setEnabled_(bool(history))
+
         if not history:
-            empty = NSTextField.labelWithString_("No transcriptions yet.")
-            empty.setFrame_(NSMakeRect(0, container_h // 2 - 10, container_w, 20))
+            cy = container_h // 2
+            sym = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "clock.arrow.circlepath", "History"
+            )
+            if sym is not None:
+                sym.setSize_(NSMakeSize(34, 34))
+                ib = NSButton.alloc().initWithFrame_(
+                    NSMakeRect(container_w // 2 - 17, cy + 8, 34, 34)
+                )
+                ib.setBordered_(False)
+                ib.setImage_(sym)
+                ib.setImagePosition_(NSImageOnly)
+                ib.setEnabled_(False)
+                ib.setContentTintColor_(NSColor.tertiaryLabelColor())
+                self._hist_container.addSubview_(ib)
+
+            empty = NSTextField.labelWithString_("No transcriptions yet")
+            empty.setFrame_(NSMakeRect(0, cy - 18, container_w, 20))
             empty.setAlignment_(NSTextAlignmentCenter)
             empty.setTextColor_(NSColor.secondaryLabelColor())
             empty.setFont_(NSFont.systemFontOfSize_(13))
             self._hist_container.addSubview_(empty)
+
+            hint = NSTextField.labelWithString_("Press ⇧⌘L anywhere to start dictating.")
+            hint.setFrame_(NSMakeRect(0, cy - 38, container_w, 16))
+            hint.setAlignment_(NSTextAlignmentCenter)
+            hint.setTextColor_(NSColor.tertiaryLabelColor())
+            hint.setFont_(NSFont.systemFontOfSize_(11))
+            self._hist_container.addSubview_(hint)
             return
 
         for i, entry in enumerate(history):
