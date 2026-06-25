@@ -60,7 +60,7 @@ def render_png(pixel_size: int) -> bytes:
     bird = NSImage.alloc().initWithContentsOfFile_(os.path.join(HERE, "icon-app.svg"))
     if bird is not None:
         nat = bird.size()
-        target_h = side * 0.56
+        target_h = side * 0.66
         scale = target_h / nat.height if nat.height else 1.0
         target_w = nat.width * scale
         dest = NSMakeRect(
