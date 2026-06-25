@@ -13,12 +13,23 @@ Run with:  python app.py
 
 import math
 import os
+import sys
 import threading
 
 # PyTorch on macOS can SIGABRT from duplicate OpenMP runtimes / heavy threading.
 # Set before torch is imported (it loads lazily during transcription).
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+
+def _resource_path(*parts):
+    """Resolve a bundled data file both in dev and inside a PyInstaller build.
+
+    When frozen, PyInstaller unpacks data files under sys._MEIPASS. In dev we
+    fall back to this file's own directory so `python app.py` keeps working.
+    """
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
 
 import objc
 from Foundation import NSMakePoint, NSMakeRect, NSMakeSize, NSObject, NSTimer
@@ -34,8 +45,10 @@ from AppKit import (
     NSBoldFontMask,
     NSButton,
     NSColor,
+    NSCompositingOperationDestinationIn,
     NSCompositingOperationSourceAtop,
     NSCompositingOperationSourceOver,
+    NSGradient,
     NSFontManager,
     NSImageSymbolConfiguration,
     NSRectFillUsingOperation,
@@ -46,6 +59,7 @@ from AppKit import (
     NSEventTypeRightMouseUp,
     NSFont,
     NSImage,
+    NSImageLeft,
     NSImageOnly,
     NSMenu,
     NSMenuItem,
@@ -59,6 +73,7 @@ from AppKit import (
     NSScreen,
     NSStatusBar,
     NSStatusWindowLevel,
+    NSTextAlignmentCenter,
     NSTextAlignmentLeft,
     NSTextField,
     NSVariableStatusItemLength,
@@ -92,6 +107,7 @@ ALLOWED_TYPES = ["opus", "mp3", "wav", "m4a", "mp4", "aac", "flac", "ogg", "mov"
 DEFAULT_MIC = "System default"
 
 PILL_W, PILL_H = 320, 52
+PILL_W_COMPACT = 196   # transcribing / done (no buttons)
 
 
 def accent_blue(alpha=1.0):
@@ -104,7 +120,7 @@ def wave_blue():
     return NSColor.colorWithSRGBRed_green_blue_alpha_(0.40, 0.70, 1.0, 0.95)
 
 
-FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts", "Arimo.ttf")
+FONT_PATH = _resource_path("fonts", "Arimo.ttf")
 FONT_FAMILY = "Arimo"
 # (NSFontManager weight, traits) per logical weight name.
 _WEIGHTS = {"regular": (5, 0), "medium": (6, 0), "bold": (9, NSBoldFontMask)}
@@ -200,11 +216,29 @@ class AppController(NSObject):
     @objc.python_method
     def _startup_hello(self):
         self.statusLabel.setStringValue_("Lyrebird listo · ⇧⌘L")
+        self.statusLabel.setAlignment_(NSTextAlignmentCenter)
+        self.statusLabel.setFrame_(NSMakeRect(0, 14, PILL_W_COMPACT, 22))
         self.waveform.setHidden_(True)
         self.spinner.setHidden_(True)
         self.cancelButton.setHidden_(True)
         self.doneButton.setHidden_(True)
-        self._show_pill()
+        # Resize to compact width
+        self.pillContent.setFrame_(NSMakeRect(0, 0, PILL_W_COMPACT, PILL_H))
+        self.tintLayer.setFrame_(NSMakeRect(0, 0, PILL_W_COMPACT, PILL_H))
+        # Position below the status bar icon instead of screen-center
+        btn = self.statusItem.button()
+        if btn and btn.window():
+            icon_frame = btn.window().frame()
+            ix = icon_frame.origin.x + icon_frame.size.width / 2
+            iy = icon_frame.origin.y
+            x = ix - PILL_W_COMPACT / 2
+            y = iy - PILL_H - 6
+            self.panel.setFrame_display_animate_(
+                NSMakeRect(x, y, PILL_W_COMPACT, PILL_H), True, False
+            )
+        else:
+            self._resize_pill(PILL_W_COMPACT, animate=False)
+        self.panel.orderFrontRegardless()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             2.2, self, "autoHide:", None, False
         )
@@ -231,7 +265,7 @@ class AppController(NSObject):
         app_menu = NSMenu.alloc().init()
         for title, action, key in (
             ("Start / Stop Listening", "toggleListen:", "l"),
-            ("Settings…", "showSettings:", ","),
+            ("Settings…", "openSettings:", ","),
         ):
             it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
             it.setTarget_(self)
@@ -272,18 +306,52 @@ class AppController(NSObject):
 
     # ------------------------------------------------------- status item
     @objc.python_method
+    @objc.python_method
+    def _load_svg_icon(self, size=16):
+        """Load the custom SVG icon at `size` points tall, preserving aspect ratio."""
+        svg_path = _resource_path("icon-menubar.svg")
+        img = NSImage.alloc().initWithContentsOfFile_(svg_path)
+        if img is not None:
+            nat = img.size()
+            w = round(nat.width / nat.height * size) if nat.height > 0 else size
+            img.setSize_(NSMakeSize(w, size))
+            return img
+        return self._make_gradient_symbol("mic.fill", 17, (0.25, 0.62, 1.00), (0.04, 0.14, 0.52))
+
+    @objc.python_method
+    def _make_gradient_symbol(self, name, size, start_rgb, end_rgb):
+        """SF Symbol filled with a top-to-bottom gradient. Returns NSImage."""
+        sym = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, name)
+        if sym is None:
+            return None
+        sym.setSize_(NSMakeSize(size, size))
+
+        result = NSImage.alloc().initWithSize_(NSMakeSize(size, size))
+        result.lockFocus()
+
+        s_col = NSColor.colorWithSRGBRed_green_blue_alpha_(start_rgb[0], start_rgb[1], start_rgb[2], 1.0)
+        e_col = NSColor.colorWithSRGBRed_green_blue_alpha_(end_rgb[0], end_rgb[1], end_rgb[2], 1.0)
+        grad = NSGradient.alloc().initWithStartingColor_endingColor_(s_col, e_col)
+        grad.drawInRect_angle_(NSMakeRect(0, 0, size, size), 90.0)
+
+        sym.drawInRect_fromRect_operation_fraction_(
+            NSMakeRect(0, 0, size, size),
+            NSMakeRect(0, 0, 0, 0),
+            NSCompositingOperationDestinationIn,
+            1.0,
+        )
+
+        result.unlockFocus()
+        return result
+
     def _build_status_item(self):
         self.statusItem = NSStatusBar.systemStatusBar().statusItemWithLength_(
             NSVariableStatusItemLength
         )
         self.statusItem.setVisible_(True)
         button = self.statusItem.button()
-        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "mic.fill", "Lyrebird"
-        )
+        img = self._load_svg_icon()
         if img is not None:
-            img.setSize_(NSMakeSize(17, 17))
-            img.setTemplate_(True)
             button.setImage_(img)
             button.setImagePosition_(NSImageOnly)
         else:
@@ -294,25 +362,28 @@ class AppController(NSObject):
         button.sendActionOn_(NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)
 
     @objc.python_method
+    @objc.python_method
+    def _menu_item(self, title, action, key="", symbol=None):
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+        item.setTarget_(self)
+        if symbol:
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, title)
+            if img is not None:
+                img.setSize_(NSMakeSize(16, 16))
+                item.setImage_(img)
+        return item
+
     def _build_menu(self):
         menu = NSMenu.alloc().init()
 
-        lang_menu = NSMenu.alloc().init()
-        for label, code in LANGUAGES:
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                label, "setLanguage:", ""
-            )
-            item.setTarget_(self)
-            item.setRepresentedObject_(label)
-            if code == self.language:
-                item.setState_(1)
-            lang_menu.addItem_(item)
-        lang_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Language", None, ""
-        )
-        lang_item.setSubmenu_(lang_menu)
-        menu.addItem_(lang_item)
+        # --- Toggle Recording
+        toggle = self._menu_item("Toggle Recording", "toggleListen:", "", symbol="waveform")
+        menu.addItem_(toggle)
 
+        # --- Transcribe file
+        menu.addItem_(self._menu_item("Transcribe File…", "chooseFile:", symbol="doc.badge.waveform"))
+
+        # --- History submenu
         hist_menu = NSMenu.alloc().init()
         history = self.store.history()
         if history:
@@ -320,18 +391,11 @@ class AppController(NSObject):
                 preview = " ".join(entry.get("text", "").split())
                 if len(preview) > 50:
                     preview = preview[:47] + "…"
-                item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                    preview, "copyHistory:", ""
-                )
-                item.setTarget_(self)
-                item.setRepresentedObject_(entry.get("text", ""))
-                hist_menu.addItem_(item)
+                hi = self._menu_item(preview, "copyHistory:")
+                hi.setRepresentedObject_(entry.get("text", ""))
+                hist_menu.addItem_(hi)
             hist_menu.addItem_(NSMenuItem.separatorItem())
-            clear = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "Clear history", "clearHistory:", ""
-            )
-            clear.setTarget_(self)
-            hist_menu.addItem_(clear)
+            hist_menu.addItem_(self._menu_item("Clear history", "clearHistory:"))
         else:
             empty = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "No history yet", None, ""
@@ -339,25 +403,80 @@ class AppController(NSObject):
             empty.setEnabled_(False)
             hist_menu.addItem_(empty)
         hist_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "History (last 5)", None, ""
+            "History…", None, ""
         )
+        hist_icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_("clock.arrow.circlepath", "History")
+        if hist_icon is not None:
+            hist_icon.setSize_(NSMakeSize(16, 16))
+            hist_item.setImage_(hist_icon)
         hist_item.setSubmenu_(hist_menu)
         menu.addItem_(hist_item)
 
+        # --- Settings
+        settings_item = self._menu_item("Settings…", "openSettings:", ",", symbol="gearshape")
+        settings_item.setKeyEquivalentModifierMask_(1 << 20)  # NSCommandKeyMask
+        menu.addItem_(settings_item)
+
         menu.addItem_(NSMenuItem.separatorItem())
-        for title, action in (
-            ("Settings…", "showSettings:"),
-            ("Transcribe file…", "chooseFile:"),
-        ):
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, "")
-            item.setTarget_(self)
-            menu.addItem_(item)
-        menu.addItem_(NSMenuItem.separatorItem())
-        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Quit Lyrebird", "quitApp:", "q"
+
+        # --- Microphone submenu (inline, like SuperWhisper)
+        devices = [DEFAULT_MIC] + [name for _i, name in list_input_devices()]
+        saved_device = self.store.get("device")
+        current_mic = saved_device if saved_device in devices else DEFAULT_MIC
+        mic_menu = NSMenu.alloc().init()
+        for name in devices:
+            mi = self._menu_item(name, "setDeviceFromMenu:")
+            mi.setRepresentedObject_(name)
+            if name == current_mic:
+                mi.setState_(1)
+            mic_menu.addItem_(mi)
+        mic_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            current_mic, None, ""
         )
-        quit_item.setTarget_(self)
-        menu.addItem_(quit_item)
+        mic_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "laptopcomputer", "Microphone"
+        )
+        if mic_img is not None:
+            mic_img.setSize_(NSMakeSize(16, 16))
+            mic_item.setImage_(mic_img)
+        mic_item.setSubmenu_(mic_menu)
+        menu.addItem_(mic_item)
+        self.micMenuItem = mic_item
+
+        # --- Language submenu (inline)
+        lang_menu = NSMenu.alloc().init()
+        current_lang_label = CODE_TO_LABEL.get(self.language, "Auto-detect")
+        for label, code in LANGUAGES:
+            li = self._menu_item(label, "setLanguage:")
+            li.setRepresentedObject_(label)
+            if code == self.language:
+                li.setState_(1)
+            lang_menu.addItem_(li)
+        lang_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            current_lang_label, None, ""
+        )
+        lang_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "text.bubble", "Language"
+        )
+        if lang_img is not None:
+            lang_img.setSize_(NSMakeSize(16, 16))
+            lang_item.setImage_(lang_img)
+        lang_item.setSubmenu_(lang_menu)
+        menu.addItem_(lang_item)
+        self.langMenuItem = lang_item
+
+        menu.addItem_(NSMenuItem.separatorItem())
+
+        # --- Version
+        ver_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Version 1.0", None, ""
+        )
+        ver_item.setEnabled_(False)
+        menu.addItem_(ver_item)
+
+        # --- Quit
+        menu.addItem_(self._menu_item("Quit", "quitApp:", "q"))
+
         self.menu = menu
 
     # --------------------------------------------------------- pill UI
@@ -418,6 +537,8 @@ class AppController(NSObject):
         tint.setFrame_(NSMakeRect(0, 0, PILL_W, PILL_H))
         tint.setBackgroundColor_(accent_blue(0.18).CGColor())
         content.layer().addSublayer_(tint)
+        self.pillContent = content
+        self.tintLayer = tint
 
         self.cancelButton = self._circle_button(
             NSMakeRect(9, 9, 34, 34), "xmark", "cancelClicked:",
@@ -451,9 +572,19 @@ class AppController(NSObject):
         self.panel = panel
 
     @objc.python_method
+    def _resize_pill(self, w, animate=True):
+        scr = NSScreen.mainScreen().frame()
+        x = scr.origin.x + (scr.size.width - w) / 2.0
+        y = scr.origin.y + scr.size.height - PILL_H - 64
+        self.panel.setFrame_display_animate_(NSMakeRect(x, y, w, PILL_H), True, animate)
+        self.pillContent.setFrame_(NSMakeRect(0, 0, w, PILL_H))
+        self.tintLayer.setFrame_(NSMakeRect(0, 0, w, PILL_H))
+
+    @objc.python_method
     def _show_pill(self):
         scr = NSScreen.mainScreen().frame()
-        x = scr.origin.x + (scr.size.width - PILL_W) / 2.0
+        w = self.panel.frame().size.width
+        x = scr.origin.x + (scr.size.width - w) / 2.0
         y = scr.origin.y + scr.size.height - PILL_H - 64
         self.panel.setFrameOrigin_(NSMakePoint(x, y))
         self.panel.orderFrontRegardless()
@@ -466,23 +597,60 @@ class AppController(NSObject):
     def _set_pill_state(self, st):
         listening = st == "listening"
         transcribing = st == "transcribing"
+        done = st == "done"
+        compact = transcribing or done
+
         self.waveform.setHidden_(not listening)
+        self.cancelButton.setHidden_(not listening)
+        self.doneButton.setHidden_(not listening)
         self.spinner.setHidden_(not transcribing)
         if transcribing:
             self.spinner.startAnimation_(None)
         else:
             self.spinner.stopAnimation_(None)
-        self.cancelButton.setHidden_(not listening)
-        self.doneButton.setHidden_(not listening)
-        self.statusLabel.setStringValue_(
-            {"listening": "Listening", "transcribing": "Transcribing…", "done": "Copied ✓"}.get(st, "")
-        )
+
+        label_text = {
+            "listening": "Listening",
+            "transcribing": "Transcribing…",
+            "done": "Copied ✓",
+        }.get(st, "")
+        self.statusLabel.setStringValue_(label_text)
+
+        if compact:
+            # Compact pill: spinner (if transcribing) + centered label
+            w = PILL_W_COMPACT
+            if transcribing:
+                pad = (w - 20 - 8 - 110) // 2
+                self.spinner.setFrame_(NSMakeRect(pad, 16, 20, 20))
+                self.statusLabel.setFrame_(NSMakeRect(pad + 28, 14, 130, 22))
+                self.statusLabel.setAlignment_(NSTextAlignmentLeft)
+            else:
+                self.statusLabel.setFrame_(NSMakeRect(0, 14, w, 22))
+                self.statusLabel.setAlignment_(NSTextAlignmentCenter)
+            self._resize_pill(w)
+        else:
+            self.spinner.setFrame_(NSMakeRect(108, 16, 20, 20))
+            self.statusLabel.setFrame_(NSMakeRect(144, 16, 120, 20))
+            self.statusLabel.setAlignment_(NSTextAlignmentLeft)
+            self._resize_pill(PILL_W)
 
     @objc.python_method
     def _set_mic_active(self, active):
-        self.statusItem.button().setContentTintColor_(
-            accent_blue(1.0) if active else None
-        )
+        btn = self.statusItem.button()
+        if active:
+            stop_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "stop.fill", "Stop"
+            )
+            if stop_img is not None:
+                stop_img.setSize_(NSMakeSize(17, 17))
+                stop_img.setTemplate_(True)
+                btn.setImage_(stop_img)
+            btn.setContentTintColor_(NSColor.systemRedColor())
+        else:
+            mic_img = self._load_svg_icon()
+            if mic_img is not None:
+                btn.setImage_(mic_img)
+            btn.setContentTintColor_(None)
 
     # ------------------------------------------------------ wave animation
     @objc.python_method
@@ -604,8 +772,211 @@ class AppController(NSObject):
 
     # --------------------------------------------------------- settings
     @objc.python_method
+    @objc.python_method
+    def _settings_glass_card(self, parent, x, y, w, h):
+        v = NSView.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+        v.setWantsLayer_(True)
+        v.layer().setBackgroundColor_(
+            NSColor.colorWithSRGBRed_green_blue_alpha_(0.55, 0.55, 0.60, 0.14).CGColor()
+        )
+        v.layer().setCornerRadius_(10.0)
+        v.layer().setBorderWidth_(0.5)
+        v.layer().setBorderColor_(
+            NSColor.colorWithSRGBRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.09).CGColor()
+        )
+        parent.addSubview_(v)
+        return v
+
+    @objc.python_method
+    def _settings_header(self, parent, text, x, y, w):
+        lbl = NSTextField.labelWithString_(text.upper())
+        lbl.setFrame_(NSMakeRect(x, y, w, 13))
+        lbl.setFont_(NSFont.systemFontOfSize_(10))
+        lbl.setTextColor_(NSColor.secondaryLabelColor())
+        parent.addSubview_(lbl)
+
+    @objc.python_method
+    def _settings_row_sep(self, parent, x, y, w):
+        s = NSView.alloc().initWithFrame_(NSMakeRect(x, y, w, 0.5))
+        s.setWantsLayer_(True)
+        s.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
+        parent.addSubview_(s)
+
+    @objc.python_method
+    def _settings_popup_row(self, parent, card_w, row_y, row_h, label_text, action):
+        lbl = NSTextField.labelWithString_(label_text)
+        lbl.setFrame_(NSMakeRect(16, row_y + (row_h - 20) // 2, 130, 20))
+        lbl.setTextColor_(NSColor.labelColor())
+        lbl.setFont_(NSFont.systemFontOfSize_(13))
+        parent.addSubview_(lbl)
+        px = 160
+        pw = card_w - px - 16
+        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(px, row_y + (row_h - 26) // 2, pw, 26), False
+        )
+        popup.setTarget_(self)
+        popup.setAction_(action)
+        parent.addSubview_(popup)
+        return popup
+
+    @objc.python_method
+    def _build_settings_config_section(self, cw, H):
+        sec = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, cw, H))
+
+        # Top-anchored layout (Cocoa: y=0 at bottom, so we walk a `top` cursor
+        # downward from just under the transparent titlebar). Each card's frame
+        # y is its bottom edge: top - height.
+        PAD = 24
+        card_w = cw - PAD * 2
+        top = H - 40
+
+        # --- Title + subtitle
+        title = NSTextField.labelWithString_("Configuration")
+        title.setFrame_(NSMakeRect(PAD, top - 26, card_w, 26))
+        title.setFont_(NSFont.boldSystemFontOfSize_(20))
+        title.setTextColor_(NSColor.labelColor())
+        sec.addSubview_(title)
+        top -= 26
+
+        sub = NSTextField.labelWithString_("Model, language and audio input.")
+        sub.setFrame_(NSMakeRect(PAD, top - 20, card_w, 16))
+        sub.setFont_(NSFont.systemFontOfSize_(12))
+        sub.setTextColor_(NSColor.secondaryLabelColor())
+        sec.addSubview_(sub)
+        top -= 20 + 26
+
+        def group(header_text, card_h):
+            nonlocal top
+            self._settings_header(sec, header_text, PAD, top - 13, card_w)
+            top -= 13 + 8
+            card = self._settings_glass_card(sec, PAD, top - card_h, card_w, card_h)
+            top -= card_h + 22
+            return card
+
+        # --- Transcription (primary settings first)
+        trans_card = group("Transcription", 96)
+        self.modelPopup = self._settings_popup_row(trans_card, card_w, 48, 48, "Model", "modelChanged:")
+        self.modelPopup.addItemsWithTitles_(MODELS)
+        self._settings_row_sep(trans_card, 16, 48, card_w - 32)
+        self.langPopup = self._settings_popup_row(trans_card, card_w, 0, 48, "Language", "settingsLanguageChanged:")
+        self.langPopup.addItemsWithTitles_([lbl for lbl, _ in LANGUAGES])
+
+        # --- Audio
+        audio_card = group("Audio", 48)
+        self.micPopup = self._settings_popup_row(audio_card, card_w, 0, 48, "Microphone", "micChanged:")
+
+        # --- General
+        gen_card = group("General", 48)
+        self.autoCopyCheck = NSButton.checkboxWithTitle_target_action_(
+            "Copy to clipboard automatically", self, "autoCopyToggled:"
+        )
+        self.autoCopyCheck.setFrame_(NSMakeRect(16, 13, card_w - 32, 22))
+        gen_card.addSubview_(self.autoCopyCheck)
+
+        # --- Status line, pinned to the bottom
+        self.settingsStatus = NSTextField.labelWithString_("")
+        self.settingsStatus.setFrame_(NSMakeRect(PAD, 16, card_w, 16))
+        self.settingsStatus.setTextColor_(NSColor.tertiaryLabelColor())
+        self.settingsStatus.setFont_(NSFont.systemFontOfSize_(11))
+        sec.addSubview_(self.settingsStatus)
+
+        return sec
+
+    @objc.python_method
+    def _build_settings_history_section(self, cw, H):
+        sec = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, cw, H))
+
+        title_lbl = NSTextField.labelWithString_("History")
+        title_lbl.setFrame_(NSMakeRect(20, H - 52, cw - 40, 28))
+        title_lbl.setFont_(NSFont.boldSystemFontOfSize_(18))
+        title_lbl.setTextColor_(NSColor.labelColor())
+        sec.addSubview_(title_lbl)
+
+        sub_lbl = NSTextField.labelWithString_("Last 5 transcriptions. Click any card to copy.")
+        sub_lbl.setFrame_(NSMakeRect(20, H - 76, cw - 40, 18))
+        sub_lbl.setFont_(NSFont.systemFontOfSize_(12))
+        sub_lbl.setTextColor_(NSColor.secondaryLabelColor())
+        sec.addSubview_(sub_lbl)
+
+        clear_btn = NSButton.alloc().initWithFrame_(NSMakeRect(20, 10, 120, 28))
+        clear_btn.setTitle_("Clear History")
+        clear_btn.setBezelStyle_(1)  # NSRoundedBezelStyle
+        clear_btn.setTarget_(self)
+        clear_btn.setAction_("clearHistory:")
+        sec.addSubview_(clear_btn)
+
+        # Cards container
+        self._hist_container = NSView.alloc().initWithFrame_(
+            NSMakeRect(16, 48, cw - 32, H - 108)
+        )
+        sec.addSubview_(self._hist_container)
+
+        return sec
+
+    @objc.python_method
+    def _build_settings_about_section(self, cw, H):
+        sec = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, cw, H))
+
+        # Icon
+        icon_img = self._load_svg_icon(48)
+        if icon_img:
+            icon_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw // 2 - 24, H - 96, 48, 48))
+            icon_btn.setBordered_(False)
+            icon_btn.setImage_(icon_img)
+            icon_btn.setImagePosition_(NSImageOnly)
+            icon_btn.setEnabled_(False)
+            sec.addSubview_(icon_btn)
+
+        name_lbl = NSTextField.labelWithString_("Lyrebird")
+        name_lbl.setFrame_(NSMakeRect(0, H - 124, cw, 24))
+        name_lbl.setAlignment_(NSTextAlignmentCenter)
+        name_lbl.setFont_(NSFont.boldSystemFontOfSize_(18))
+        name_lbl.setTextColor_(NSColor.labelColor())
+        sec.addSubview_(name_lbl)
+
+        ver_lbl = NSTextField.labelWithString_("Version 1.0  ·  100% local speech-to-text")
+        ver_lbl.setFrame_(NSMakeRect(0, H - 148, cw, 18))
+        ver_lbl.setAlignment_(NSTextAlignmentCenter)
+        ver_lbl.setFont_(NSFont.systemFontOfSize_(12))
+        ver_lbl.setTextColor_(NSColor.secondaryLabelColor())
+        sec.addSubview_(ver_lbl)
+
+        # Info card
+        info_card = self._settings_glass_card(sec, 16, H - 280, cw - 32, 120)
+        for i, (label, value) in enumerate([
+            ("Hotkey", "⇧⌘L  start / stop recording"),
+            ("Right-click icon", "Language, history, settings, quit"),
+            ("Model cache", "~/.cache/whisper"),
+            ("Config", "~/Library/Application Support/Lyrebird"),
+        ]):
+            row_y = 120 - 28 - i * 26
+            lbl = NSTextField.labelWithString_(label)
+            lbl.setFrame_(NSMakeRect(16, row_y, 130, 18))
+            lbl.setFont_(NSFont.systemFontOfSize_(11))
+            lbl.setTextColor_(NSColor.secondaryLabelColor())
+            info_card.addSubview_(lbl)
+            val = NSTextField.labelWithString_(value)
+            val.setFrame_(NSMakeRect(150, row_y, cw - 182, 18))
+            val.setFont_(NSFont.systemFontOfSize_(11))
+            val.setTextColor_(NSColor.labelColor())
+            info_card.addSubview_(val)
+
+        lic_lbl = NSTextField.labelWithString_(
+            "MIT License © 2026 Painted Bird  ·  Whisper (MIT)  ·  Arimo font (OFL 1.1)"
+        )
+        lic_lbl.setFrame_(NSMakeRect(0, 20, cw, 16))
+        lic_lbl.setAlignment_(NSTextAlignmentCenter)
+        lic_lbl.setFont_(NSFont.systemFontOfSize_(10))
+        lic_lbl.setTextColor_(NSColor.tertiaryLabelColor())
+        sec.addSubview_(lic_lbl)
+
+        return sec
+
     def _build_settings(self):
-        W, H = 380, 296
+        W, H = 640, 460
+        SIDEBAR = 170
+        cw = W - SIDEBAR - 1
+
         style = (
             NSWindowStyleMaskTitled
             | NSWindowStyleMaskClosable
@@ -614,76 +985,84 @@ class AppController(NSObject):
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, W, H), style, NSBackingStoreBuffered, False
         )
-        win.setTitle_("Lyrebird settings")
+        win.setTitle_("Lyrebird")
         win.setReleasedWhenClosed_(False)
         win.setTitlebarAppearsTransparent_(True)
         win.center()
         win.setDelegate_(self)
 
-        effect = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
-        effect.setMaterial_(NSVisualEffectMaterialWindowBackground)
-        effect.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
-        effect.setState_(NSVisualEffectStateActive)
-        win.setContentView_(effect)
-        c = effect
+        bg = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+        bg.setMaterial_(NSVisualEffectMaterialWindowBackground)
+        bg.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        bg.setState_(NSVisualEffectStateActive)
+        win.setContentView_(bg)
 
-        def label(text, y, w=90):
-            lbl = NSTextField.labelWithString_(text)
-            lbl.setFrame_(NSMakeRect(20, y, w, 22))
-            c.addSubview_(lbl)
-            return lbl
-
-        title = NSTextField.labelWithString_("Settings")
-        title.setFrame_(NSMakeRect(20, H - 44, 340, 24))
-        title.setFont_(NSFont.boldSystemFontOfSize_(15))
-        title.setTextColor_(accent_blue(1.0))
-        c.addSubview_(title)
-
-        label("Model:", H - 86)
-        self.modelPopup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(118, H - 88, 240, 26), False
+        # ---- Sidebar
+        sidebar = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, SIDEBAR, H))
+        sidebar.setWantsLayer_(True)
+        sidebar.layer().setBackgroundColor_(
+            NSColor.colorWithSRGBRed_green_blue_alpha_(0.0, 0.0, 0.0, 0.20).CGColor()
         )
-        self.modelPopup.addItemsWithTitles_(MODELS)
-        self.modelPopup.setTarget_(self)
-        self.modelPopup.setAction_("modelChanged:")
-        c.addSubview_(self.modelPopup)
+        bg.addSubview_(sidebar)
 
-        label("Language:", H - 124)
-        self.langPopup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(118, H - 126, 240, 26), False
-        )
-        self.langPopup.addItemsWithTitles_([lbl for lbl, _ in LANGUAGES])
-        self.langPopup.setTarget_(self)
-        self.langPopup.setAction_("settingsLanguageChanged:")
-        c.addSubview_(self.langPopup)
+        sep_v = NSView.alloc().initWithFrame_(NSMakeRect(SIDEBAR, 0, 1, H))
+        sep_v.setWantsLayer_(True)
+        sep_v.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
+        bg.addSubview_(sep_v)
 
-        label("Microphone:", H - 162)
-        self.micPopup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(118, H - 164, 240, 26), False
-        )
-        self.micPopup.setTarget_(self)
-        self.micPopup.setAction_("micChanged:")
-        c.addSubview_(self.micPopup)
+        app_lbl = NSTextField.labelWithString_("Lyrebird")
+        app_lbl.setFrame_(NSMakeRect(14, H - 48, SIDEBAR - 20, 24))
+        app_lbl.setFont_(NSFont.boldSystemFontOfSize_(14))
+        app_lbl.setTextColor_(NSColor.labelColor())
+        sidebar.addSubview_(app_lbl)
 
-        self.autoCopyCheck = NSButton.checkboxWithTitle_target_action_(
-            "Copy to clipboard automatically", self, "autoCopyToggled:"
-        )
-        self.autoCopyCheck.setFrame_(NSMakeRect(20, H - 200, 340, 22))
-        c.addSubview_(self.autoCopyCheck)
+        # Sidebar nav items
+        self._settings_nav_btns = {}
+        nav_items = [
+            ("config",   "gearshape.fill",          "Configuration"),
+            ("history",  "clock.arrow.circlepath",  "History"),
+            ("about",    "info.circle.fill",         "About"),
+        ]
+        for i, (sec_id, symbol, title) in enumerate(nav_items):
+            item_y = H - 88 - i * 44
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(8, item_y, SIDEBAR - 16, 36))
+            btn.setBordered_(False)
+            btn.setButtonType_(0)
+            btn.setWantsLayer_(True)
+            btn.layer().setCornerRadius_(8.0)
+            sym_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, title)
+            if sym_img:
+                sym_img.setSize_(NSMakeSize(14, 14))
+                btn.setImage_(sym_img)
+            btn.setImagePosition_(NSImageLeft)
+            btn.setTitle_("   " + title)
+            btn.setFont_(NSFont.systemFontOfSize_(12))
+            btn.setTarget_(self)
+            btn.setAction_("settingsSidebarClicked:")
+            btn.setRepresentedObject_(sec_id)
+            sidebar.addSubview_(btn)
+            self._settings_nav_btns[sec_id] = btn
 
-        note = NSTextField.labelWithString_(
-            "Tip: use Auto-detect for mixed English/Spanish."
-        )
-        note.setFrame_(NSMakeRect(20, H - 234, 340, 18))
-        note.setTextColor_(NSColor.secondaryLabelColor())
-        note.setFont_(NSFont.systemFontOfSize_(11))
-        c.addSubview_(note)
+        # ---- Content container
+        cc = NSView.alloc().initWithFrame_(NSMakeRect(SIDEBAR + 1, 0, cw, H))
+        bg.addSubview_(cc)
 
-        self.settingsStatus = NSTextField.labelWithString_("")
-        self.settingsStatus.setFrame_(NSMakeRect(20, 16, 340, 18))
-        self.settingsStatus.setTextColor_(NSColor.secondaryLabelColor())
-        self.settingsStatus.setFont_(NSFont.systemFontOfSize_(11))
-        c.addSubview_(self.settingsStatus)
+        # Build section views
+        self._settings_section_views = {}
+        for sec_id, builder in [
+            ("config",  lambda: self._build_settings_config_section(cw, H)),
+            ("history", lambda: self._build_settings_history_section(cw, H)),
+            ("about",   lambda: self._build_settings_about_section(cw, H)),
+        ]:
+            v = builder()
+            cc.addSubview_(v)
+            self._settings_section_views[sec_id] = v
+
+        # Show config by default
+        self._settings_active_section = "config"
+        for sec_id, v in self._settings_section_views.items():
+            v.setHidden_(sec_id != "config")
+        self._settings_update_nav("config")
 
         self.settingsWindow = win
 
@@ -712,12 +1091,18 @@ class AppController(NSObject):
         if self.settingsStatus is not None:
             self.settingsStatus.setStringValue_(text)
 
-    def showSettings_(self, sender):
-        if self.settingsWindow is None:
-            self._build_settings()
-        self._sync_settings()
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        self.settingsWindow.makeKeyAndOrderFront_(None)
+    def openSettings_(self, sender):
+        try:
+            if self.settingsWindow is None:
+                print("[settings] building...", flush=True)
+                self._build_settings()
+                print("[settings] built ok", flush=True)
+            self._sync_settings()
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            self.settingsWindow.makeKeyAndOrderFront_(None)
+        except Exception:
+            import traceback
+            print("[settings] CRASH:\n" + traceback.format_exc(), flush=True)
 
     def modelChanged_(self, sender):
         name = sender.titleOfSelectedItem()
@@ -739,6 +1124,18 @@ class AppController(NSObject):
         name = None if title == DEFAULT_MIC else title
         self.recorder.set_device(name)
         self.store.set("device", name)
+
+    def setDeviceFromMenu_(self, sender):
+        name_str = sender.representedObject()
+        name = None if name_str == DEFAULT_MIC else name_str
+        self.recorder.set_device(name)
+        self.store.set("device", name)
+        # update checkmark and label
+        if hasattr(self, "micMenuItem"):
+            self.micMenuItem.setTitle_(name_str)
+            for i in range(self.micMenuItem.submenu().numberOfItems()):
+                mi = self.micMenuItem.submenu().itemAtIndex_(i)
+                mi.setState_(1 if mi.representedObject() == name_str else 0)
 
     def autoCopyToggled_(self, sender):
         self.auto_copy = bool(sender.state())
@@ -790,6 +1187,11 @@ class AppController(NSObject):
         self.store.set("language", self.language)
         if self.settingsWindow is not None:
             self.langPopup.selectItemWithTitle_(label)
+        if hasattr(self, "langMenuItem"):
+            self.langMenuItem.setTitle_(label)
+            for i in range(self.langMenuItem.submenu().numberOfItems()):
+                li = self.langMenuItem.submenu().itemAtIndex_(i)
+                li.setState_(1 if li.representedObject() == label else 0)
 
     def copyHistory_(self, sender):
         text = sender.representedObject()
@@ -805,6 +1207,110 @@ class AppController(NSObject):
 
     def clearHistory_(self, sender):
         self.store.clear_history()
+        if hasattr(self, "_hist_container") and self._hist_container is not None:
+            self._refresh_settings_history()
+
+    def settingsSidebarClicked_(self, sender):
+        sec_id = sender.representedObject()
+        if sec_id == self._settings_active_section:
+            return
+        self._settings_section_views[self._settings_active_section].setHidden_(True)
+        self._settings_active_section = sec_id
+        self._settings_section_views[sec_id].setHidden_(False)
+        if sec_id == "history":
+            self._refresh_settings_history()
+        self._settings_update_nav(sec_id)
+
+    @objc.python_method
+    def _settings_update_nav(self, active_id):
+        for sec_id, btn in self._settings_nav_btns.items():
+            if sec_id == active_id:
+                btn.layer().setBackgroundColor_(accent_blue(0.20).CGColor())
+                btn.setContentTintColor_(accent_blue(1.0))
+            else:
+                btn.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
+                btn.setContentTintColor_(NSColor.secondaryLabelColor())
+
+    @objc.python_method
+    def _refresh_settings_history(self):
+        if not hasattr(self, "_hist_container") or self._hist_container is None:
+            return
+        for sv in list(self._hist_container.subviews()):
+            sv.removeFromSuperview()
+
+        history = self.store.history()
+        container_w = self._hist_container.frame().size.width
+        container_h = self._hist_container.frame().size.height
+        card_h, gap = 68, 10
+
+        if not history:
+            empty = NSTextField.labelWithString_("No transcriptions yet.")
+            empty.setFrame_(NSMakeRect(0, container_h // 2 - 10, container_w, 20))
+            empty.setAlignment_(NSTextAlignmentCenter)
+            empty.setTextColor_(NSColor.secondaryLabelColor())
+            empty.setFont_(NSFont.systemFontOfSize_(13))
+            self._hist_container.addSubview_(empty)
+            return
+
+        for i, entry in enumerate(history):
+            y = container_h - (i + 1) * (card_h + gap) + gap // 2
+            text = entry.get("text", "")
+
+            # Glass card
+            card = self._settings_glass_card(
+                self._hist_container, 0, y, container_w, card_h
+            )
+
+            # Text preview (top line)
+            preview = " ".join(text.split())
+            short = preview[:100] + ("…" if len(preview) > 100 else "")
+            txt = NSTextField.labelWithString_(short)
+            txt.setFrame_(NSMakeRect(14, card_h - 34, container_w - 60, 20))
+            txt.setFont_(NSFont.systemFontOfSize_(12))
+            txt.setTextColor_(NSColor.labelColor())
+            card.addSubview_(txt)
+
+            # Word count line
+            wc = NSTextField.labelWithString_("%d words" % len(preview.split()))
+            wc.setFrame_(NSMakeRect(14, 12, 120, 15))
+            wc.setFont_(NSFont.systemFontOfSize_(10))
+            wc.setTextColor_(NSColor.secondaryLabelColor())
+            card.addSubview_(wc)
+
+            # Copy icon button
+            copy_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "doc.on.doc", "Copy"
+            )
+            copy_btn = NSButton.alloc().initWithFrame_(
+                NSMakeRect(container_w - 44, (card_h - 22) // 2, 22, 22)
+            )
+            copy_btn.setBordered_(False)
+            if copy_img:
+                copy_img.setSize_(NSMakeSize(16, 16))
+                copy_btn.setImage_(copy_img)
+                copy_btn.setImagePosition_(NSImageOnly)
+            copy_btn.setContentTintColor_(NSColor.secondaryLabelColor())
+            copy_btn.setTarget_(self)
+            copy_btn.setAction_("historyCardClicked:")
+            copy_btn.setRepresentedObject_(text)
+            card.addSubview_(copy_btn)
+
+            # Transparent click overlay covering the card
+            overlay = NSButton.alloc().initWithFrame_(
+                NSMakeRect(0, 0, container_w - 50, card_h)
+            )
+            overlay.setBordered_(False)
+            overlay.setTitle_("")
+            overlay.setTarget_(self)
+            overlay.setAction_("historyCardClicked:")
+            overlay.setRepresentedObject_(text)
+            card.addSubview_(overlay)
+
+    def historyCardClicked_(self, sender):
+        text = sender.representedObject()
+        if text:
+            self._copy_to_clipboard(text)
+            self._flash("Copied ✓")
 
     def chooseFile_(self, sender):
         if self.state != "idle" or not self.modelReady:
