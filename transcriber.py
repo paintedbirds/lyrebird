@@ -50,11 +50,13 @@ class Transcriber:
                 self.model = whisper.load_model(self.model_name)
         return self.model
 
-    def transcribe(self, audio, language=None):
+    def transcribe(self, audio, language=None, initial_prompt=None):
         """Transcribe an audio file path or a float32 numpy array (16kHz mono).
 
         Returns the transcribed text. `language` is a Whisper code like "es"
-        or None for auto-detect.
+        or None for auto-detect. `initial_prompt` is an optional string of
+        custom vocabulary (names, jargon) that biases Whisper's decoding
+        toward those words/spellings without any fine-tuning.
 
         On auto-detect, the audio is split on pauses and each phrase is detected
         and transcribed independently, so a recording that mixes English and
@@ -65,6 +67,8 @@ class Transcriber:
 
         if self.model is None:
             self.load()
+
+        prompt = initial_prompt.strip() if initial_prompt else None
 
         with torch.no_grad():
             if language is None:
@@ -78,6 +82,7 @@ class Transcriber:
                             fp16=False,
                             verbose=False,
                             condition_on_previous_text=False,
+                            initial_prompt=prompt,
                         )
                         txt = res["text"].strip()
                         if txt:
@@ -89,6 +94,7 @@ class Transcriber:
                 language=language,
                 fp16=False,      # CPU has no fp16; avoids a noisy warning
                 verbose=False,
+                initial_prompt=prompt,
             )
         return result["text"].strip()
 
@@ -116,7 +122,10 @@ class Transcriber:
             self._vad,
             sampling_rate=16000,
             min_silence_duration_ms=300,
-            speech_pad_ms=200,
+            # Padding around each detected speech span. Bumped up from 200ms:
+            # at 200 the first/last word of a phrase was sometimes clipped by
+            # the VAD boundary before Whisper ever saw it.
+            speech_pad_ms=350,
         )
         if not timestamps:
             return None

@@ -199,6 +199,7 @@ class AppController(NSObject):
         self.state = "idle"  # idle | listening | transcribing
         self.language = store.get("language")
         self.auto_copy = store.get("auto_copy")
+        self.vocabulary = store.get("vocabulary")
         self.waveTimer = None
         self.settingsWindow = None
         self.settingsStatus = None
@@ -715,7 +716,9 @@ class AppController(NSObject):
     @objc.python_method
     def _transcribe_thread(self, audio):
         try:
-            text = self.transcriber.transcribe(audio, language=self.language)
+            text = self.transcriber.transcribe(
+                audio, language=self.language, initial_prompt=self.vocabulary
+            )
             AppHelper.callAfter(self._on_transcribed, text or "")
         except Exception as exc:  # noqa: BLE001
             AppHelper.callAfter(self._on_error, str(exc))
@@ -820,6 +823,24 @@ class AppController(NSObject):
         return popup
 
     @objc.python_method
+    def _settings_text_row(self, parent, card_w, row_y, row_h, label_text, placeholder=""):
+        lbl = NSTextField.labelWithString_(label_text)
+        lbl.setFrame_(NSMakeRect(16, row_y + (row_h - 20) // 2, 130, 20))
+        lbl.setTextColor_(NSColor.labelColor())
+        lbl.setFont_(NSFont.systemFontOfSize_(13))
+        parent.addSubview_(lbl)
+        px = 160
+        pw = card_w - px - 16
+        field = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(px, row_y + (row_h - 24) // 2, pw, 24)
+        )
+        field.setPlaceholderString_(placeholder)
+        field.setBezeled_(True)
+        field.setFont_(NSFont.systemFontOfSize_(12))
+        parent.addSubview_(field)
+        return field
+
+    @objc.python_method
     def _build_settings_config_section(self, cw, H):
         sec = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, cw, H))
 
@@ -854,12 +875,19 @@ class AppController(NSObject):
             return card
 
         # --- Transcription (primary settings first)
-        trans_card = group("Transcription", 96)
-        self.modelPopup = self._settings_popup_row(trans_card, card_w, 48, 48, "Model", "modelChanged:")
+        trans_card = group("Transcription", 144)
+        self.modelPopup = self._settings_popup_row(trans_card, card_w, 96, 48, "Model", "modelChanged:")
         self.modelPopup.addItemsWithTitles_(MODELS)
-        self._settings_row_sep(trans_card, 16, 48, card_w - 32)
-        self.langPopup = self._settings_popup_row(trans_card, card_w, 0, 48, "Language", "settingsLanguageChanged:")
+        self._settings_row_sep(trans_card, 16, 96, card_w - 32)
+        self.langPopup = self._settings_popup_row(trans_card, card_w, 48, 48, "Language", "settingsLanguageChanged:")
         self.langPopup.addItemsWithTitles_([lbl for lbl, _ in LANGUAGES])
+        self._settings_row_sep(trans_card, 16, 48, card_w - 32)
+        self.vocabField = self._settings_text_row(
+            trans_card, card_w, 0, 48, "Vocabulary",
+            placeholder="Names, jargon to bias toward (optional)",
+        )
+        self.vocabField.setStringValue_(self.vocabulary or "")
+        self.vocabField.setDelegate_(self)
 
         # --- Audio
         audio_card = group("Audio", 48)
@@ -921,11 +949,15 @@ class AppController(NSObject):
         sec = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, cw, H))
 
         # Hero block (icon + name + version) and the info card are centered as
-        # one group so the section doesn't leave an empty bottom half.
+        # one group so the section doesn't leave an empty bottom half. Each
+        # element's y is expressed as an offset from the vertical center so
+        # the whole group re-centers correctly if H ever changes.
+        mid = H // 2
+
         # Icon
         icon_img = self._load_svg_icon(52)
         if icon_img:
-            icon_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw // 2 - 26, 318, 52, 52))
+            icon_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw // 2 - 26, mid + 88, 52, 52))
             icon_btn.setBordered_(False)
             icon_btn.setImage_(icon_img)
             icon_btn.setImagePosition_(NSImageOnly)
@@ -933,21 +965,21 @@ class AppController(NSObject):
             sec.addSubview_(icon_btn)
 
         name_lbl = NSTextField.labelWithString_("Lyrebird")
-        name_lbl.setFrame_(NSMakeRect(0, 278, cw, 26))
+        name_lbl.setFrame_(NSMakeRect(0, mid + 48, cw, 26))
         name_lbl.setAlignment_(NSTextAlignmentCenter)
         name_lbl.setFont_(NSFont.boldSystemFontOfSize_(20))
         name_lbl.setTextColor_(NSColor.labelColor())
         sec.addSubview_(name_lbl)
 
         ver_lbl = NSTextField.labelWithString_("Version 1.0  ·  100% local speech-to-text")
-        ver_lbl.setFrame_(NSMakeRect(0, 258, cw, 18))
+        ver_lbl.setFrame_(NSMakeRect(0, mid + 28, cw, 18))
         ver_lbl.setAlignment_(NSTextAlignmentCenter)
         ver_lbl.setFont_(NSFont.systemFontOfSize_(12))
         ver_lbl.setTextColor_(NSColor.secondaryLabelColor())
         sec.addSubview_(ver_lbl)
 
         # Info card
-        info_card = self._settings_glass_card(sec, 24, 118, cw - 48, 100)
+        info_card = self._settings_glass_card(sec, 24, mid - 112, cw - 48, 100)
         for i, (label, value) in enumerate([
             ("Hotkey", "⇧⌘L  start / stop recording"),
             ("Right-click icon", "Language, history, settings, quit"),
@@ -977,7 +1009,7 @@ class AppController(NSObject):
         return sec
 
     def _build_settings(self):
-        W, H = 640, 460
+        W, H = 640, 508
         SIDEBAR = 170
         cw = W - SIDEBAR - 1
 
@@ -1084,6 +1116,8 @@ class AppController(NSObject):
         self.langPopup.selectItemWithTitle_(CODE_TO_LABEL.get(self.language, LANGUAGES[0][0]))
         self._refresh_mic_items()
         self.autoCopyCheck.setState_(1 if self.auto_copy else 0)
+        if getattr(self, "vocabField", None) is not None:
+            self.vocabField.setStringValue_(self.vocabulary or "")
         self._set_settings_status(
             "Model ready: %s" % self.transcriber.model_name
             if self.modelReady
@@ -1144,6 +1178,12 @@ class AppController(NSObject):
     def autoCopyToggled_(self, sender):
         self.auto_copy = bool(sender.state())
         self.store.set("auto_copy", self.auto_copy)
+
+    def controlTextDidEndEditing_(self, notification):
+        field = notification.object()
+        if field is getattr(self, "vocabField", None):
+            self.vocabulary = field.stringValue()
+            self.store.set("vocabulary", self.vocabulary)
 
     def windowShouldClose_(self, sender):
         sender.orderOut_(None)

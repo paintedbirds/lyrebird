@@ -19,6 +19,7 @@ DEFAULTS = {
     "language": None,        # None = auto-detect
     "device": None,          # None = system default microphone
     "auto_copy": True,
+    "vocabulary": "",        # custom words/names to bias transcription toward
     "history": [],           # list of {"text": str, "ts": float}
 }
 
