@@ -4,3 +4,7 @@ __pycache__/
 *.log
 .DS_Store
 *.pid
+
+# PyInstaller build artifacts
+build/
+dist/

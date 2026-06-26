@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Creates Lyrebird.app in ~/Applications so it appears in Spotlight.
-# Re-run any time you move the whisper-menubar folder.
+# Re-run any time you move the lyrebird folder.
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,20 +21,20 @@ mkdir -p "$DEST/Contents/Resources/pyhome"
 
 cp "$DIR/AppIcon.icns" "$DEST/Contents/Resources/AppIcon.icns"
 
-# --- Resolve the real venv interpreter + its stdlib home + site-packages ---
-# We COPY (not symlink, not a zsh/shebang wrapper) the actual python3.12
-# binary into Contents/MacOS/Lyrebird. Two things this buys us:
-#  1. No exec() call happens after the process starts (LaunchServices execs
-#     this Mach-O binary directly) — avoids the confirmed macOS 26 bug
-#     (FB21015611) where NSStatusItem never renders if the bundle's main
-#     executable swaps process image via exec() after launch.
-#  2. Activity Monitor / the mic permission prompt show "Lyrebird" instead
-#     of "Python", because that's now literally the binary's own name.
-PY_REAL_BIN="$(readlink -f "$DIR/.venv/bin/python3" 2>/dev/null || python3 -c "import os,sys; print(os.path.realpath('$DIR/.venv/bin/python3'))")"
+# --- Resolve the FRAMEWORK python + its stdlib home + site-packages ---
+# We COPY the *framework* python binary into Contents/MacOS/Lyrebird.
+# CRITICAL: it must be the framework python (Resources/Python.app/.../Python),
+# NOT bin/python3.12. On macOS, bin/python3.12 re-exec()s itself to the
+# framework python at startup; that post-launch exec() triggers the confirmed
+# macOS 26 bug (FB21015611) where the NSStatusItem never renders when launched
+# via Finder/Spotlight/login. The framework python does NOT re-exec, so the
+# menu bar icon renders. Bonus: Activity Monitor / the mic prompt show
+# "Lyrebird".
 PY_BASE_PREFIX="$("$DIR/.venv/bin/python3" -c 'import sys; print(sys.base_prefix)')"
 PY_SITE_PACKAGES="$("$DIR/.venv/bin/python3" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+PY_FW_BIN="$PY_BASE_PREFIX/Resources/Python.app/Contents/MacOS/Python"
 
-cp "$PY_REAL_BIN" "$DEST/Contents/MacOS/$APP_NAME"
+cp "$PY_FW_BIN" "$DEST/Contents/MacOS/$APP_NAME"
 chmod +x "$DEST/Contents/MacOS/$APP_NAME"
 
 # sitecustomize.py runs automatically on interpreter startup (Python's
