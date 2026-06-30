@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon-app.svg" width="96" alt="Lyrebird" />
+</p>
+
 # Lyrebird
 
 A 100% local speech-to-text app for macOS. Lives in the menu bar (no Dock
