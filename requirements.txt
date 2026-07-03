@@ -4,6 +4,9 @@ openai-whisper
 # Native menu bar app + floating pill window
 pyobjc-framework-Cocoa
 
+# Decode audio files (opus/ogg/mp3/flac/wav) without the ffmpeg CLI
+soundfile
+
 # Microphone recording + WAV writing
 sounddevice
 scipy

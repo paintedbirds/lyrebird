@@ -27,7 +27,7 @@ hiddenimports = [
 ]
 
 # Pull in package data + dynamic libs + submodules for the heavy deps.
-for pkg in ("whisper", "silero_vad", "sounddevice", "scipy"):
+for pkg in ("whisper", "silero_vad", "sounddevice", "scipy", "soundfile"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -93,12 +93,12 @@ app = BUNDLE(
     name="Lyrebird.app",
     icon="AppIcon.icns",
     bundle_identifier="com.paintedbirds.lyrebird",
-    version="1.0.0",
+    version="1.0.1",
     info_plist={
         "CFBundleName": "Lyrebird",
         "CFBundleDisplayName": "Lyrebird",
-        "CFBundleShortVersionString": "1.0",
-        "CFBundleVersion": "1.0.0",
+        "CFBundleShortVersionString": "1.0.1",
+        "CFBundleVersion": "1.0.1",
         "LSMinimumSystemVersion": "12.0",
         # Menu-bar accessory app: no Dock icon, no menu bar takeover.
         "LSUIElement": True,
