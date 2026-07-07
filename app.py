@@ -94,7 +94,7 @@ from AppKit import (
     NSWindowStyleMaskTitled,
 )
 
-from Quartz import CALayer
+from Quartz import CABasicAnimation, CAGradientLayer, CALayer
 
 from audio_recorder import Recorder, list_input_devices
 from store import Store
@@ -107,7 +107,9 @@ ALLOWED_TYPES = ["opus", "mp3", "wav", "m4a", "mp4", "aac", "flac", "ogg", "mov"
 DEFAULT_MIC = "System default"
 
 PILL_W, PILL_H = 320, 52
-PILL_W_COMPACT = 196   # transcribing / done (no buttons)
+PILL_W_COMPACT = 196   # done (label + copy fallback button)
+PILL_W_MINI = 142      # transcribing (cancel X + small label over gradient)
+PILL_H_MINI = 47       # transcribing pill height (~10% under PILL_H)
 
 
 def accent_blue(alpha=1.0):
@@ -176,9 +178,10 @@ class WaveformView(NSView):
         x = (bounds.size.width - total) / 2.0
         cy = bounds.size.height / 2.0
         wave_blue().set()
+        amp = self.level ** 0.55  # perceptual curve: quiet speech still visible
         for i in range(n):
-            osc = 0.5 + 0.5 * math.sin(self.phase * 2.0 + i * 0.9)
-            h = 4.0 + (bounds.size.height - 8.0) * (0.22 + 0.78 * self.level) * osc
+            osc = 0.35 + 0.65 * abs(math.sin(self.phase * 2.0 + i * 0.9))
+            h = 3.0 + (bounds.size.height - 6.0) * (0.06 + 0.94 * amp) * osc
             bar = NSMakeRect(x, cy - h / 2.0, bar_w, h)
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 bar, bar_w / 2.0, bar_w / 2.0
@@ -201,6 +204,7 @@ class AppController(NSObject):
         self.auto_copy = store.get("auto_copy")
         self.vocabulary = store.get("vocabulary")
         self.waveTimer = None
+        self._tgen = 0  # bumping this discards in-flight transcription results
         self.settingsWindow = None
         self.settingsStatus = None
         self._build_pill()
@@ -223,6 +227,8 @@ class AppController(NSObject):
         self.spinner.setHidden_(True)
         self.cancelButton.setHidden_(True)
         self.doneButton.setHidden_(True)
+        self.copyButton.setHidden_(True)
+        self.cancelMiniButton.setHidden_(True)
         # Resize to compact width
         self.pillContent.setFrame_(NSMakeRect(0, 0, PILL_W_COMPACT, PILL_H))
         self.tintLayer.setFrame_(NSMakeRect(0, 0, PILL_W_COMPACT, PILL_H))
@@ -240,9 +246,7 @@ class AppController(NSObject):
         else:
             self._resize_pill(PILL_W_COMPACT, animate=False)
         self.panel.orderFrontRegardless()
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            2.2, self, "autoHide:", None, False
-        )
+        self._schedule_hide(2.2)
 
     @objc.python_method
     def _register_hotkey(self):
@@ -494,6 +498,10 @@ class AppController(NSObject):
         b.setWantsLayer_(True)
         b.layer().setBackgroundColor_(bg.CGColor())
         b.layer().setCornerRadius_(frame.size.height / 2.0)
+        b.layer().setBorderWidth_(0.5)
+        b.layer().setBorderColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.16).CGColor()
+        )
         b.setTarget_(self)
         b.setAction_(action)
         return b
@@ -529,29 +537,64 @@ class AppController(NSObject):
         content.layer().setCornerRadius_(PILL_H / 2.0)
         content.layer().setMasksToBounds_(True)
         content.layer().setBorderWidth_(1.0)
-        content.layer().setBorderColor_(accent_blue(0.55).CGColor())
+        content.layer().setBorderColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.14).CGColor()
+        )
         panel.setContentView_(content)
 
         # Vibrant blue tint over the frosted glass (a sublayer, so it doesn't
         # intercept clicks or block window dragging).
         tint = CALayer.layer()
         tint.setFrame_(NSMakeRect(0, 0, PILL_W, PILL_H))
-        tint.setBackgroundColor_(accent_blue(0.18).CGColor())
+        tint.setBackgroundColor_(accent_blue(0.10).CGColor())
         content.layer().addSublayer_(tint)
         self.pillContent = content
         self.tintLayer = tint
 
+        # Animated gradient shown only while transcribing. The color stops
+        # sweep across the pill (locations animation) for a loading shimmer.
+        grad = CAGradientLayer.layer()
+        grad.setFrame_(NSMakeRect(0, 0, PILL_W, PILL_H))
+        grad.setColors_([
+            NSColor.colorWithSRGBRed_green_blue_alpha_(0.02, 0.10, 0.48, 0.92).CGColor(),
+            NSColor.colorWithSRGBRed_green_blue_alpha_(0.10, 0.42, 0.98, 0.95).CGColor(),
+            NSColor.colorWithSRGBRed_green_blue_alpha_(0.45, 0.80, 1.00, 0.95).CGColor(),
+            NSColor.colorWithSRGBRed_green_blue_alpha_(0.02, 0.10, 0.48, 0.92).CGColor(),
+        ])
+        grad.setLocations_([0.0, 0.35, 0.65, 1.0])
+        grad.setStartPoint_((0.0, 0.5))
+        grad.setEndPoint_((1.0, 0.5))
+        grad.setOpacity_(0.0)
+        content.layer().addSublayer_(grad)
+        self.gradientLayer = grad
+
+        # Translucent backgrounds so the pill glass shows through
         self.cancelButton = self._circle_button(
             NSMakeRect(9, 9, 34, 34), "xmark", "cancelClicked:",
-            NSColor.colorWithCalibratedWhite_alpha_(0.22, 1.0), NSColor.whiteColor(),
+            NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.10), NSColor.whiteColor(),
         )
         content.addSubview_(self.cancelButton)
 
         self.doneButton = self._circle_button(
             NSMakeRect(PILL_W - 9 - 34, 9, 34, 34), "checkmark", "doneClicked:",
-            accent_blue(1.0), NSColor.whiteColor(),
+            accent_blue(0.32), NSColor.whiteColor(),
         )
         content.addSubview_(self.doneButton)
+
+        self.copyButton = self._circle_button(
+            NSMakeRect(PILL_W_COMPACT - 9 - 28, 12, 28, 28), "doc.on.doc", "copyAgainClicked:",
+            accent_blue(0.9), NSColor.whiteColor(),
+        )
+        self.copyButton.setHidden_(True)
+        content.addSubview_(self.copyButton)
+
+        # Translucent background so the animated gradient shows through
+        self.cancelMiniButton = self._circle_button(
+            NSMakeRect(8, 12, 22, 22), "xmark", "cancelTranscribeClicked:",
+            NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.18), NSColor.whiteColor(),
+        )
+        self.cancelMiniButton.setHidden_(True)
+        content.addSubview_(self.cancelMiniButton)
 
         self.waveform = WaveformView.alloc().initWithFrame_(NSMakeRect(104, 14, 32, 24))
         content.addSubview_(self.waveform)
@@ -573,20 +616,24 @@ class AppController(NSObject):
         self.panel = panel
 
     @objc.python_method
-    def _resize_pill(self, w, animate=True):
+    def _resize_pill(self, w, h=PILL_H, animate=True):
         scr = NSScreen.mainScreen().frame()
         x = scr.origin.x + (scr.size.width - w) / 2.0
-        y = scr.origin.y + scr.size.height - PILL_H - 64
-        self.panel.setFrame_display_animate_(NSMakeRect(x, y, w, PILL_H), True, animate)
-        self.pillContent.setFrame_(NSMakeRect(0, 0, w, PILL_H))
-        self.tintLayer.setFrame_(NSMakeRect(0, 0, w, PILL_H))
+        # Keep the vertical center where the full-height pill sits
+        y = scr.origin.y + scr.size.height - 64 - (PILL_H + h) / 2.0
+        self.panel.setFrame_display_animate_(NSMakeRect(x, y, w, h), True, animate)
+        self.pillContent.setFrame_(NSMakeRect(0, 0, w, h))
+        self.pillContent.layer().setCornerRadius_(h / 2.0)
+        self.tintLayer.setFrame_(NSMakeRect(0, 0, w, h))
+        self.gradientLayer.setFrame_(NSMakeRect(0, 0, w, h))
 
     @objc.python_method
     def _show_pill(self):
         scr = NSScreen.mainScreen().frame()
         w = self.panel.frame().size.width
+        h = self.panel.frame().size.height
         x = scr.origin.x + (scr.size.width - w) / 2.0
-        y = scr.origin.y + scr.size.height - PILL_H - 64
+        y = scr.origin.y + scr.size.height - 64 - (PILL_H + h) / 2.0
         self.panel.setFrameOrigin_(NSMakePoint(x, y))
         self.panel.orderFrontRegardless()
 
@@ -595,20 +642,37 @@ class AppController(NSObject):
         self.panel.orderOut_(None)
 
     @objc.python_method
+    def _start_gradient(self):
+        self.gradientLayer.setOpacity_(1.0)
+        anim = CABasicAnimation.animationWithKeyPath_("locations")
+        anim.setFromValue_([-1.0, -0.65, -0.35, 0.0])
+        anim.setToValue_([1.0, 1.35, 1.65, 2.0])
+        anim.setDuration_(1.8)
+        anim.setRepeatCount_(float("inf"))
+        self.gradientLayer.addAnimation_forKey_(anim, "shimmer")
+
+    @objc.python_method
+    def _stop_gradient(self):
+        self.gradientLayer.setOpacity_(0.0)
+        self.gradientLayer.removeAllAnimations()
+
+    @objc.python_method
     def _set_pill_state(self, st):
         listening = st == "listening"
         transcribing = st == "transcribing"
         done = st == "done"
-        compact = transcribing or done
 
         self.waveform.setHidden_(not listening)
         self.cancelButton.setHidden_(not listening)
         self.doneButton.setHidden_(not listening)
-        self.spinner.setHidden_(not transcribing)
+        self.spinner.setHidden_(True)
+        self.spinner.stopAnimation_(None)
+        self.copyButton.setHidden_(not done)
+        self.cancelMiniButton.setHidden_(not transcribing)
         if transcribing:
-            self.spinner.startAnimation_(None)
+            self._start_gradient()
         else:
-            self.spinner.stopAnimation_(None)
+            self._stop_gradient()
 
         label_text = {
             "listening": "Listening",
@@ -616,21 +680,30 @@ class AppController(NSObject):
             "done": "Copied ✓",
         }.get(st, "")
         self.statusLabel.setStringValue_(label_text)
+        if not transcribing:
+            self.statusLabel.setFont_(ui_font(14, "medium"))
 
-        if compact:
-            # Compact pill: spinner (if transcribing) + centered label
+        if transcribing:
+            # Mini pill: cancel X + small label over the animated gradient
+            w = PILL_W_MINI
+            self.cancelMiniButton.setFrame_(
+                NSMakeRect(8, (PILL_H_MINI - 22) / 2.0, 22, 22)
+            )
+            self.statusLabel.setFont_(ui_font(12, "medium"))
+            self.statusLabel.setFrame_(
+                NSMakeRect(30, (PILL_H_MINI - 16) / 2.0, w - 30 - 8, 16)
+            )
+            self.statusLabel.setAlignment_(NSTextAlignmentCenter)
+            self._resize_pill(w, PILL_H_MINI)
+        elif done:
+            # Label centered in the free space left of the copy button
             w = PILL_W_COMPACT
-            if transcribing:
-                pad = (w - 20 - 8 - 110) // 2
-                self.spinner.setFrame_(NSMakeRect(pad, 16, 20, 20))
-                self.statusLabel.setFrame_(NSMakeRect(pad + 28, 14, 130, 22))
-                self.statusLabel.setAlignment_(NSTextAlignmentLeft)
-            else:
-                self.statusLabel.setFrame_(NSMakeRect(0, 14, w, 22))
-                self.statusLabel.setAlignment_(NSTextAlignmentCenter)
+            btn_x = w - 9 - 28
+            self.statusLabel.setFrame_(NSMakeRect(0, (PILL_H - 20) / 2.0, btn_x, 20))
+            self.statusLabel.setAlignment_(NSTextAlignmentCenter)
+            self.copyButton.setFrame_(NSMakeRect(btn_x, (PILL_H - 28) / 2.0, 28, 28))
             self._resize_pill(w)
         else:
-            self.spinner.setFrame_(NSMakeRect(108, 16, 20, 20))
             self.statusLabel.setFrame_(NSMakeRect(144, 16, 120, 20))
             self.statusLabel.setAlignment_(NSTextAlignmentLeft)
             self._resize_pill(PILL_W)
@@ -708,52 +781,71 @@ class AppController(NSObject):
         self.spinner.setHidden_(True)
         self.cancelButton.setHidden_(True)
         self.doneButton.setHidden_(True)
+        self.copyButton.setHidden_(True)
+        self.cancelMiniButton.setHidden_(True)
         self._show_pill()
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.4, self, "autoHide:", None, False
-        )
+        self._schedule_hide(1.4)
 
     @objc.python_method
     def _transcribe_thread(self, audio):
+        gen = self._tgen
         try:
             text = self.transcriber.transcribe(
                 audio, language=self.language, initial_prompt=self.vocabulary
             )
-            AppHelper.callAfter(self._on_transcribed, text or "")
+            AppHelper.callAfter(self._on_transcribed, gen, text or "")
         except Exception as exc:  # noqa: BLE001
-            AppHelper.callAfter(self._on_error, str(exc))
+            AppHelper.callAfter(self._on_error, gen, str(exc))
 
     @objc.python_method
-    def _on_transcribed(self, text):
+    def _on_transcribed(self, gen, text):
+        if gen != self._tgen:
+            return  # cancelled while transcribing
         text = text.strip()
         if text:
             self.store.add_history(text)
+            self._last_text = text
+            self._set_pill_state("done")
             if self.auto_copy:
                 self._copy_to_clipboard(text)
-                self._set_pill_state("done")
             else:
-                self._set_pill_state("idle")
                 self.statusLabel.setStringValue_("Done")
+            self.state = "idle"
+            self._schedule_hide(3.5)
         else:
             self._set_pill_state("idle")
             self.statusLabel.setStringValue_("No speech")
-        self.state = "idle"
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.2, self, "autoHide:", None, False
-        )
+            self.state = "idle"
+            self._schedule_hide(1.2)
 
     @objc.python_method
-    def _on_error(self, msg):
+    def _on_error(self, gen, msg):
+        if gen != self._tgen:
+            return  # cancelled while transcribing
         self._set_pill_state("idle")
         self.statusLabel.setStringValue_("Error")
         self.state = "idle"
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.6, self, "autoHide:", None, False
+        self._schedule_hide(1.6)
+
+    @objc.python_method
+    def _schedule_hide(self, delay):
+        t = getattr(self, "_hideTimer", None)
+        if t is not None:
+            t.invalidate()
+        self._hideTimer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            delay, self, "autoHide:", None, False
         )
 
     def autoHide_(self, timer):
         if self.state == "idle":
             self._hide_pill()
+
+    def copyAgainClicked_(self, sender):
+        text = getattr(self, "_last_text", "")
+        if text:
+            self._copy_to_clipboard(text)
+            self.statusLabel.setStringValue_("Copied ✓")
+        self._schedule_hide(1.5)
 
     @objc.python_method
     def _copy_to_clipboard(self, text):
@@ -1217,6 +1309,13 @@ class AppController(NSObject):
         elif self.state == "listening":
             self._finish_listening()
 
+    def cancelTranscribeClicked_(self, sender):
+        if self.state == "transcribing":
+            self._tgen += 1
+        self.state = "idle"
+        self._stop_gradient()
+        self._hide_pill()
+
     def cancelClicked_(self, sender):
         if self.state == "listening":
             self.recorder.stop()
@@ -1242,12 +1341,11 @@ class AppController(NSObject):
         if not text:
             return
         self._copy_to_clipboard(text)
+        self._last_text = text
         self.state = "idle"
         self._set_pill_state("done")
         self._show_pill()
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.2, self, "autoHide:", None, False
-        )
+        self._schedule_hide(3.5)
 
     def clearHistory_(self, sender):
         self.store.clear_history()

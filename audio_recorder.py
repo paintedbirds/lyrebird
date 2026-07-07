@@ -57,8 +57,12 @@ class Recorder:
         self._frames.append(indata.copy())
         if indata.size:
             rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
-            lvl = min(1.0, rms * 8.0)
-            self.level = 0.7 * self.level + 0.3 * lvl
+            lvl = min(1.0, rms * 12.0)
+            # Fast attack, slow release: bars jump with speech, settle in pauses
+            if lvl > self.level:
+                self.level = 0.4 * self.level + 0.6 * lvl
+            else:
+                self.level = 0.88 * self.level + 0.12 * lvl
 
     def start(self):
         """Open the input stream and begin capturing frames."""
