@@ -105,12 +105,12 @@ app = BUNDLE(
     name="Lyrebird.app",
     icon="AppIcon.icns",
     bundle_identifier="com.paintedbirds.lyrebird",
-    version="1.0.1",
+    version="1.1.0",
     info_plist={
         "CFBundleName": "Lyrebird",
         "CFBundleDisplayName": "Lyrebird",
-        "CFBundleShortVersionString": "1.0.1",
-        "CFBundleVersion": "1.0.1",
+        "CFBundleShortVersionString": "1.1.0",
+        "CFBundleVersion": "1.1.0",
         "LSMinimumSystemVersion": "12.0",
         # Menu-bar accessory app: no Dock icon, no menu bar takeover.
         "LSUIElement": True,
