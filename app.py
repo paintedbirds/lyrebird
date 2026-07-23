@@ -32,7 +32,14 @@ def _resource_path(*parts):
     return os.path.join(base, *parts)
 
 import objc
-from Foundation import NSMakePoint, NSMakeRect, NSMakeSize, NSObject, NSTimer
+from Foundation import (
+    NSAttributedString,
+    NSMakePoint,
+    NSMakeRect,
+    NSMakeSize,
+    NSObject,
+    NSTimer,
+)
 from PyObjCTools import AppHelper
 from AppKit import (
     NSAppearance,
@@ -58,6 +65,8 @@ from AppKit import (
     NSEventModifierFlagControl,
     NSEventTypeRightMouseUp,
     NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
     NSImage,
     NSImageLeft,
     NSImageOnly,
@@ -98,11 +107,29 @@ from Quartz import CABasicAnimation, CAGradientLayer, CALayer
 
 from audio_recorder import Recorder, list_input_devices
 from store import Store
-from transcriber import LANGUAGES, Transcriber
+from transcriber import DEFAULT_MODEL, LANGUAGES, Transcriber
+import translator
 
 LANG_MAP = {label: code for label, code in LANGUAGES}
 CODE_TO_LABEL = {code: label for label, code in LANGUAGES}
-MODELS = ["tiny", "base", "small", "medium", "large-v3"]
+
+# Human-friendly labels shown in Settings, mapped to their mlx-community
+# HF Hub repo id. "Large v3 Turbo" is the default (see transcriber.DEFAULT_MODEL).
+MODEL_OPTIONS = [
+    ("Tiny", "mlx-community/whisper-tiny"),
+    ("Base", "mlx-community/whisper-base-mlx"),
+    ("Small", "mlx-community/whisper-small-mlx"),
+    ("Medium", "mlx-community/whisper-medium-mlx"),
+    ("Large v3", "mlx-community/whisper-large-v3-mlx"),
+    ("Large v3 Turbo", "mlx-community/whisper-large-v3-turbo"),
+]
+MODEL_LABEL_TO_REPO = {label: repo for label, repo in MODEL_OPTIONS}
+MODEL_REPO_TO_LABEL = {repo: label for label, repo in MODEL_OPTIONS}
+MODELS = [label for label, _repo in MODEL_OPTIONS]
+
+# Only these two are supported by the pill's translate-on-demand chip.
+TRANSLATABLE_LANGS = {"es", "en"}
+
 ALLOWED_TYPES = ["opus", "mp3", "wav", "m4a", "mp4", "aac", "flac", "ogg", "mov", "amr", "3gp"]
 DEFAULT_MIC = "System default"
 
@@ -205,6 +232,8 @@ class AppController(NSObject):
         self.vocabulary = store.get("vocabulary")
         self.waveTimer = None
         self._tgen = 0  # bumping this discards in-flight transcription results
+        self._last_lang = None
+        self._translated_cache = {}
         self.settingsWindow = None
         self.settingsStatus = None
         self._build_pill()
@@ -507,6 +536,33 @@ class AppController(NSObject):
         return b
 
     @objc.python_method
+    def _chip_attr_title(self, title):
+        return NSAttributedString.alloc().initWithString_attributes_(
+            title,
+            {
+                NSFontAttributeName: ui_font(11, "bold"),
+                NSForegroundColorAttributeName: NSColor.whiteColor(),
+            },
+        )
+
+    @objc.python_method
+    def _text_chip_button(self, frame, title, action):
+        """Small pill-shaped button with a text title (language chip)."""
+        b = NSButton.alloc().initWithFrame_(frame)
+        b.setBordered_(False)
+        b.setAttributedTitle_(self._chip_attr_title(title))
+        b.setWantsLayer_(True)
+        b.layer().setBackgroundColor_(accent_blue(0.55).CGColor())
+        b.layer().setCornerRadius_(frame.size.height / 2.0)
+        b.layer().setBorderWidth_(0.5)
+        b.layer().setBorderColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.16).CGColor()
+        )
+        b.setTarget_(self)
+        b.setAction_(action)
+        return b
+
+    @objc.python_method
     def _build_pill(self):
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, PILL_W, PILL_H),
@@ -588,6 +644,14 @@ class AppController(NSObject):
         self.copyButton.setHidden_(True)
         content.addSubview_(self.copyButton)
 
+        # Language toggle chip, only shown in "done" state when the detected
+        # language is ES or EN (translator.py only covers that pair).
+        self.translateButton = self._text_chip_button(
+            NSMakeRect(0, 12, 30, 28), "EN", "translateClicked:"
+        )
+        self.translateButton.setHidden_(True)
+        content.addSubview_(self.translateButton)
+
         # Translucent background so the animated gradient shows through
         self.cancelMiniButton = self._circle_button(
             NSMakeRect(8, 12, 22, 22), "xmark", "cancelTranscribeClicked:",
@@ -605,6 +669,22 @@ class AppController(NSObject):
         self.spinner.setDisplayedWhenStopped_(False)
         self.spinner.setHidden_(True)
         content.addSubview_(self.spinner)
+
+        # Small check icon shown next to the label in the "done" state, in
+        # addition to the "Copied ✓" text (not just relying on the glyph).
+        check_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "checkmark.circle.fill", "Done"
+        )
+        self.doneCheckIcon = NSButton.alloc().initWithFrame_(NSMakeRect(11, (PILL_H - 18) / 2.0, 18, 18))
+        self.doneCheckIcon.setBordered_(False)
+        self.doneCheckIcon.setEnabled_(False)
+        if check_img is not None:
+            check_img.setSize_(NSMakeSize(18, 18))
+            self.doneCheckIcon.setImage_(check_img)
+            self.doneCheckIcon.setImagePosition_(NSImageOnly)
+        self.doneCheckIcon.setContentTintColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(0.35, 0.95, 0.55, 1.0))
+        self.doneCheckIcon.setHidden_(True)
+        content.addSubview_(self.doneCheckIcon)
 
         self.statusLabel = NSTextField.labelWithString_("Listening")
         self.statusLabel.setFrame_(NSMakeRect(144, 16, 120, 20))
@@ -668,6 +748,8 @@ class AppController(NSObject):
         self.spinner.setHidden_(True)
         self.spinner.stopAnimation_(None)
         self.copyButton.setHidden_(not done)
+        self.translateButton.setHidden_(True)  # done branch below un-hides if applicable
+        self.doneCheckIcon.setHidden_(not done)
         self.cancelMiniButton.setHidden_(not transcribing)
         if transcribing:
             self._start_gradient()
@@ -696,12 +778,23 @@ class AppController(NSObject):
             self.statusLabel.setAlignment_(NSTextAlignmentCenter)
             self._resize_pill(w, PILL_H_MINI)
         elif done:
-            # Label centered in the free space left of the copy button
-            w = PILL_W_COMPACT
-            btn_x = w - 9 - 28
-            self.statusLabel.setFrame_(NSMakeRect(0, (PILL_H - 20) / 2.0, btn_x, 20))
+            # Label centered in the free space left of the copy (and,
+            # if applicable, translate) buttons.
+            show_translate = self._last_lang in TRANSLATABLE_LANGS
+            w = PILL_W_COMPACT + (38 if show_translate else 0)
+            copy_x = w - 9 - 28
+            self.copyButton.setFrame_(NSMakeRect(copy_x, (PILL_H - 28) / 2.0, 28, 28))
+            if show_translate:
+                chip_x = copy_x - 8 - 30
+                self.translateButton.setFrame_(NSMakeRect(chip_x, (PILL_H - 28) / 2.0, 30, 28))
+                target_label = "EN" if self._last_lang == "es" else "ES"
+                self.translateButton.setAttributedTitle_(self._chip_attr_title(target_label))
+                self.translateButton.setHidden_(False)
+                label_end = chip_x
+            else:
+                label_end = copy_x
+            self.statusLabel.setFrame_(NSMakeRect(34, (PILL_H - 20) / 2.0, label_end - 34, 20))
             self.statusLabel.setAlignment_(NSTextAlignmentCenter)
-            self.copyButton.setFrame_(NSMakeRect(btn_x, (PILL_H - 28) / 2.0, 28, 28))
             self._resize_pill(w)
         else:
             self.statusLabel.setFrame_(NSMakeRect(144, 16, 120, 20))
@@ -782,6 +875,8 @@ class AppController(NSObject):
         self.cancelButton.setHidden_(True)
         self.doneButton.setHidden_(True)
         self.copyButton.setHidden_(True)
+        self.translateButton.setHidden_(True)
+        self.doneCheckIcon.setHidden_(True)
         self.cancelMiniButton.setHidden_(True)
         self._show_pill()
         self._schedule_hide(1.4)
@@ -790,21 +885,23 @@ class AppController(NSObject):
     def _transcribe_thread(self, audio):
         gen = self._tgen
         try:
-            text = self.transcriber.transcribe(
+            text, lang = self.transcriber.transcribe(
                 audio, language=self.language, initial_prompt=self.vocabulary
             )
-            AppHelper.callAfter(self._on_transcribed, gen, text or "")
+            AppHelper.callAfter(self._on_transcribed, gen, text or "", lang)
         except Exception as exc:  # noqa: BLE001
             AppHelper.callAfter(self._on_error, gen, str(exc))
 
     @objc.python_method
-    def _on_transcribed(self, gen, text):
+    def _on_transcribed(self, gen, text, lang):
         if gen != self._tgen:
             return  # cancelled while transcribing
         text = text.strip()
         if text:
             self.store.add_history(text)
             self._last_text = text
+            self._last_lang = lang
+            self._translated_cache = {lang: text} if lang in TRANSLATABLE_LANGS else {}
             self._set_pill_state("done")
             if self.auto_copy:
                 self._copy_to_clipboard(text)
@@ -840,6 +937,41 @@ class AppController(NSObject):
         if self.state == "idle":
             self._hide_pill()
 
+    def translateClicked_(self, sender):
+        lang = self._last_lang
+        if lang not in TRANSLATABLE_LANGS:
+            return
+        target = "en" if lang == "es" else "es"
+        cached = self._translated_cache.get(target)
+        if cached is not None:
+            self._apply_translation(target, cached)
+            return
+        self.statusLabel.setStringValue_("Translating…")
+        threading.Thread(
+            target=self._translate_thread, args=(lang, target), daemon=True
+        ).start()
+
+    @objc.python_method
+    def _translate_thread(self, lang, target):
+        source_text = self._translated_cache.get(lang, self._last_text)
+        try:
+            translated = translator.translate(source_text, lang, target)
+            AppHelper.callAfter(self._apply_translation, target, translated)
+        except Exception:  # noqa: BLE001
+            AppHelper.callAfter(self._flash, "Translate error")
+
+    @objc.python_method
+    def _apply_translation(self, target, text):
+        self._translated_cache[target] = text
+        self._copy_to_clipboard(text)
+        self._last_text = text
+        self._last_lang = target
+        self.translateButton.setAttributedTitle_(
+            self._chip_attr_title("ES" if target == "en" else "EN")
+        )
+        self.statusLabel.setStringValue_("Copied ✓ · %s" % target.upper())
+        self._schedule_hide(3.5)
+
     def copyAgainClicked_(self, sender):
         text = getattr(self, "_last_text", "")
         if text:
@@ -855,12 +987,12 @@ class AppController(NSObject):
 
     @objc.python_method
     def _load_model_thread(self):
-        name = self.transcriber.model_name
+        label = MODEL_REPO_TO_LABEL.get(self.transcriber.model_name, self.transcriber.model_name)
         try:
-            AppHelper.callAfter(self._set_settings_status, "Loading %s…" % name)
+            AppHelper.callAfter(self._set_settings_status, "Loading %s…" % label)
             self.transcriber.load()
             self.modelReady = True
-            AppHelper.callAfter(self._set_settings_status, "Model ready: %s" % name)
+            AppHelper.callAfter(self._set_settings_status, "Model ready: %s" % label)
         except Exception:  # noqa: BLE001
             self.modelReady = False
             AppHelper.callAfter(self._set_settings_status, "Error loading model")
@@ -1204,14 +1336,18 @@ class AppController(NSObject):
 
     @objc.python_method
     def _sync_settings(self):
-        self.modelPopup.selectItemWithTitle_(self.transcriber.model_name)
+        self.modelPopup.selectItemWithTitle_(
+            MODEL_REPO_TO_LABEL.get(self.transcriber.model_name, MODELS[-1])
+        )
         self.langPopup.selectItemWithTitle_(CODE_TO_LABEL.get(self.language, LANGUAGES[0][0]))
         self._refresh_mic_items()
         self.autoCopyCheck.setState_(1 if self.auto_copy else 0)
         if getattr(self, "vocabField", None) is not None:
             self.vocabField.setStringValue_(self.vocabulary or "")
         self._set_settings_status(
-            "Model ready: %s" % self.transcriber.model_name
+            "Model ready: %s" % MODEL_REPO_TO_LABEL.get(
+                self.transcriber.model_name, self.transcriber.model_name
+            )
             if self.modelReady
             else "Loading model…"
         )
@@ -1235,14 +1371,17 @@ class AppController(NSObject):
             print("[settings] CRASH:\n" + traceback.format_exc(), flush=True)
 
     def modelChanged_(self, sender):
-        name = sender.titleOfSelectedItem()
-        if name == self.transcriber.model_name and self.modelReady:
+        label = sender.titleOfSelectedItem()
+        repo = MODEL_LABEL_TO_REPO.get(label)
+        if repo is None:
             return
-        self.store.set("model", name)
+        if repo == self.transcriber.model_name and self.modelReady:
+            return
+        self.store.set("model", repo)
         self.modelReady = False
-        self.transcriber.model_name = name
+        self.transcriber.model_name = repo
         self.transcriber.model = None
-        self._set_settings_status("Loading %s… (first use downloads it)" % name)
+        self._set_settings_status("Loading %s… (first use downloads it)" % label)
         threading.Thread(target=self._load_model_thread, daemon=True).start()
 
     def settingsLanguageChanged_(self, sender):
@@ -1342,6 +1481,8 @@ class AppController(NSObject):
             return
         self._copy_to_clipboard(text)
         self._last_text = text
+        self._last_lang = None  # unknown for history entries: hide translate chip
+        self._translated_cache = {}
         self.state = "idle"
         self._set_pill_state("done")
         self._show_pill()
@@ -1543,6 +1684,10 @@ if __name__ == "__main__":
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     controller = AppController.alloc().init()
-    controller.setup(store, Transcriber(store.get("model")), Recorder())
+    model_name = store.get("model")
+    if model_name not in MODEL_REPO_TO_LABEL:
+        # Stale value from a pre-mlx config (e.g. "small"): fall back cleanly.
+        model_name = DEFAULT_MODEL
+    controller.setup(store, Transcriber(model_name), Recorder())
     app.setDelegate_(controller)
     AppHelper.runEventLoop()

@@ -1,8 +1,8 @@
-"""Local Whisper transcription wrapper.
+"""Local mlx-whisper transcription wrapper.
 
-Loads an OpenAI Whisper model once and reuses it for every transcription.
-Everything runs on-device; no network calls are made after the model file
-has been downloaded on first use.
+Loads an mlx-whisper model once and reuses it for every transcription.
+Everything runs on-device, on the Apple Silicon GPU via MLX/Metal; no
+network calls are made after the model has been downloaded on first use.
 """
 
 import os
@@ -24,9 +24,10 @@ LANGUAGES = [
     ("Italian", "it"),
 ]
 
-# Default model. "small" is a good speed/accuracy balance for ES/EN on CPU.
-# Override with the WHISPER_MODEL env var (e.g. tiny, base, small, medium).
-DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
+# Default model: an MLX-converted checkpoint from mlx-community on Hugging
+# Face. Override with the WHISPER_MODEL env var (any mlx-community whisper
+# repo id).
+DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
 
 WHISPER_SR = 16000
 
@@ -34,8 +35,9 @@ WHISPER_SR = 16000
 def load_audio_file(path):
     """Decode an audio file to float32 mono 16kHz without needing ffmpeg.
 
-    Whisper's own load_audio() shells out to the ffmpeg CLI, which is not on
-    PATH when the bundled app is launched from Finder/Spotlight. Instead:
+    mlx_whisper accepts a numpy array directly, but its own path-based
+    decoding shells out to the ffmpeg CLI, which is not on PATH when the
+    bundled app is launched from Finder/Spotlight. Instead:
 
     1. soundfile (bundled libsndfile): opus, ogg, flac, mp3, wav.
     2. afconvert (ships with macOS): m4a, aac, mp4, mov, caf.
@@ -66,9 +68,9 @@ def load_audio_file(path):
         pass
 
     if _find_ffmpeg():
-        import whisper
+        import mlx_whisper.audio as mlx_audio
 
-        return whisper.load_audio(path)
+        return mlx_audio.load_audio(path)
 
     raise RuntimeError("Could not decode %s: %s" % (os.path.basename(path), err))
 
@@ -108,37 +110,37 @@ class Transcriber:
         self._vad = None
 
     def load(self):
-        """Load the model into memory. First run downloads it (~460MB for small)."""
-        import torch
-        import whisper  # imported lazily so the menu bar shows up fast
+        """Warm the mlx-whisper model. First run downloads it from HF Hub."""
+        import numpy as np
+        import mlx_whisper
 
         with self._lock:
             if self.model is None:
-                # Stability on macOS: single-threaded, inference-only. Avoids the
-                # PyTorch SIGABRT seen with multithreaded grad-mode toggling.
-                try:
-                    torch.set_num_threads(1)
-                    torch.set_grad_enabled(False)
-                except Exception:
-                    pass
-                self.model = whisper.load_model(self.model_name)
+                # mlx_whisper has no standalone load(); it populates its
+                # internal model cache (keyed by path_or_hf_repo) on the
+                # first transcribe() call. Warm it here with a throwaway
+                # silent clip so first-dictation latency doesn't pay for it.
+                silence = np.zeros(WHISPER_SR, dtype=np.float32)  # 1s
+                mlx_whisper.transcribe(silence, path_or_hf_repo=self.model_name)
+                self.model = self.model_name
         return self.model
 
     def transcribe(self, audio, language=None, initial_prompt=None):
         """Transcribe an audio file path or a float32 numpy array (16kHz mono).
 
-        Returns the transcribed text. `language` is a Whisper code like "es"
-        or None for auto-detect. `initial_prompt` is an optional string of
-        custom vocabulary (names, jargon) that biases Whisper's decoding
-        toward those words/spellings without any fine-tuning.
+        Returns (text, detected_lang). `language` is a Whisper code like "es"
+        or None for auto-detect; `detected_lang` is that same code when
+        forced, or the language mlx-whisper actually detected otherwise.
+        `initial_prompt` is an optional string of custom vocabulary (names,
+        jargon) that biases decoding toward those words/spellings without
+        any fine-tuning.
 
-        On auto-detect, the audio is split on pauses and each phrase is detected
-        and transcribed independently, so a recording that mixes English and
-        Spanish keeps each part in the language it was actually spoken. Forcing a
-        specific language skips this and does a single pass in that language.
+        On auto-detect, the audio is split on pauses and each phrase is
+        detected and transcribed independently, so a recording that mixes
+        English and Spanish keeps each part in the language it was actually
+        spoken. Forcing a specific language skips this and does a single
+        pass in that language.
         """
-        import torch
-
         if self.model is None:
             self.load()
 
@@ -147,33 +149,53 @@ class Transcriber:
 
         prompt = initial_prompt.strip() if initial_prompt else None
 
-        with torch.no_grad():
-            if language is None:
-                segments = self._vad_segments(audio)
-                if segments and len(segments) > 1:
-                    parts = []
-                    for chunk in segments:
-                        res = self.model.transcribe(
-                            chunk,
-                            language=None,
-                            fp16=False,
-                            verbose=False,
-                            condition_on_previous_text=False,
-                            initial_prompt=prompt,
-                        )
-                        txt = res["text"].strip()
-                        if txt:
-                            parts.append(txt)
-                    return " ".join(parts).strip()
+        if language is None:
+            segments = self._vad_segments(audio)
+            if segments and len(segments) > 1:
+                parts = []
+                detected = None
+                for chunk in segments:
+                    text, lang = self.transcribe_chunk(
+                        chunk, language=None, initial_prompt=prompt,
+                        condition_on_previous_text=False,
+                    )
+                    if text and detected is None:
+                        detected = lang
+                    if text:
+                        parts.append(text)
+                return " ".join(parts).strip(), detected
 
-            result = self.model.transcribe(
-                audio,
-                language=language,
-                fp16=False,      # CPU has no fp16; avoids a noisy warning
-                verbose=False,
-                initial_prompt=prompt,
-            )
-        return result["text"].strip()
+        return self.transcribe_chunk(audio, language=language, initial_prompt=prompt)
+
+    def transcribe_chunk(self, audio, language=None, initial_prompt=None,
+                          condition_on_previous_text=True):
+        """A single mlx-whisper pass over an already-cut chunk of audio.
+
+        Used both for the final single-segment case and for the live-preview
+        per-phrase transcription while still recording. Returns (text, lang).
+        """
+        import mlx_whisper
+
+        if self.model is None:
+            self.load()
+
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=self.model_name,
+            language=language,
+            initial_prompt=initial_prompt,
+            condition_on_previous_text=condition_on_previous_text,
+        )
+        return result["text"].strip(), result.get("language", language)
+
+    @property
+    def vad_model(self):
+        """Lazily-loaded Silero VAD model."""
+        if self._vad is None:
+            from silero_vad import load_silero_vad
+
+            self._vad = load_silero_vad()
+        return self._vad
 
     def _vad_segments(self, audio):
         """Split audio into per-phrase chunks on silence using Silero VAD.
@@ -182,7 +204,7 @@ class Transcriber:
         unavailable or the audio is too short / has no clear pauses.
         """
         try:
-            from silero_vad import get_speech_timestamps, load_silero_vad
+            from silero_vad import get_speech_timestamps
         except Exception:
             return None
 
@@ -190,12 +212,9 @@ class Transcriber:
         if arr is None or len(arr) < 16000:  # under ~1s: not worth splitting
             return None
 
-        if self._vad is None:
-            self._vad = load_silero_vad()
-
         timestamps = get_speech_timestamps(
             arr,
-            self._vad,
+            self.vad_model,
             sampling_rate=16000,
             min_silence_duration_ms=300,
             # Padding around each detected speech span. Bumped up from 200ms:

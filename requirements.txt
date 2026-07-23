@@ -1,5 +1,8 @@
-# Local Whisper transcription (pulls in torch)
-openai-whisper
+# Local Whisper transcription on Apple Silicon GPU (MLX/Metal)
+mlx-whisper
+
+# Offline ES<->EN translation for the "translate result" pill action
+argostranslate
 
 # Native menu bar app + floating pill window
 pyobjc-framework-Cocoa

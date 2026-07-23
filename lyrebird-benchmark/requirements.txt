@@ -1,0 +1,31 @@
+# Isolated from the main app's requirements.txt on purpose: this tool
+# exists to compare engines Lyrebird doesn't ship yet, so use a separate
+# venv (see README.md).
+
+# Current production backend
+openai-whisper
+
+# Option A: CTranslate2 engine, same checkpoints
+faster-whisper
+
+# Option B: Apple Silicon MLX engine
+mlx-whisper
+
+# Candidate D: NVIDIA Parakeet TDT v3 via the community MLX port
+# (unofficial — github.com/senstella/parakeet-mlx)
+parakeet-mlx
+
+# WER scoring
+jiwer
+
+# Recording + WAV I/O
+sounddevice
+scipy
+numpy
+
+# Simple browser UI (ui.py). Uses Streamlit's native st.audio_input
+# (needs Streamlit >=1.35) instead of a third-party recorder component —
+# the community audio-recorder-streamlit component sends the whole clip
+# back to Python as one JSON-encoded text blob, which silently hangs on
+# longer recordings.
+streamlit>=1.35

@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+recordings/*.wav
+recordings/*.txt
+results/*.json
+results/*.csv

@@ -9,13 +9,15 @@ import os
 import threading
 import time
 
+from transcriber import DEFAULT_MODEL
+
 APP_DIR = os.path.expanduser("~/Library/Application Support/Lyrebird")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 _OLD_CONFIG = os.path.expanduser("~/Library/Application Support/WhisperMenuBar/config.json")
 HISTORY_LIMIT = 5
 
 DEFAULTS = {
-    "model": os.environ.get("WHISPER_MODEL", "small"),
+    "model": DEFAULT_MODEL,
     "language": None,        # None = auto-detect
     "device": None,          # None = system default microphone
     "auto_copy": True,

@@ -33,7 +33,7 @@ echo "==> Installing PyInstaller into the venv (if missing)"
 echo "==> Cleaning previous build"
 rm -rf build dist
 
-echo "==> Building app bundle (this takes a few minutes; torch is large)"
+echo "==> Building app bundle (this takes a few minutes; mlx/mlx-whisper are large)"
 "$PY" -m PyInstaller --noconfirm lyrebird.spec
 
 if [[ ! -d "$APP" ]]; then

@@ -2,11 +2,18 @@
 """PyInstaller spec for Lyrebird.
 
 Builds a self-contained Lyrebird.app that bundles the Python runtime and every
-dependency (PyTorch, Whisper, silero-vad, PortAudio, etc.) so it runs on any
-Mac without a dev environment.
+dependency (MLX/Metal, mlx-whisper, silero-vad, argos-translate, PortAudio,
+etc.) so it runs on any Mac without a dev environment.
 
-Whisper model weights are NOT bundled (they are ~0.5-1.5 GB each). They download
-on first use into ~/.cache/whisper, exactly as in the dev build.
+Whisper model weights are NOT bundled (they are ~0.1-1.5 GB each, MLX format).
+They download on first use into ~/.cache/huggingface, exactly as in the dev
+build. Same for argos-translate's ES<->EN package (~50-100MB), downloaded on
+first use of the pill's translate chip.
+
+NOTE: mlx/mlx-whisper ship compiled Metal shaders/dylibs that PyInstaller may
+not discover automatically the way it does pure-Python packages. This is the
+biggest unverified packaging risk in the mlx-whisper migration -- build and
+run on a clean machine before shipping, not just `python app.py` from source.
 
 Build:   pyinstaller --noconfirm lyrebird.spec
 """
@@ -23,19 +30,24 @@ hiddenimports = [
     "audio_recorder",
     "store",
     "transcriber",
+    "translator",
     "hotkey",
 ]
 
 # Pull in package data + dynamic libs + submodules for the heavy deps.
-for pkg in ("whisper", "silero_vad", "sounddevice", "scipy", "soundfile"):
+for pkg in (
+    "mlx",
+    "mlx_whisper",
+    "argostranslate",
+    "silero_vad",
+    "sounddevice",
+    "scipy",
+    "soundfile",
+):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
     hiddenimports += h
-
-# tiktoken (whisper's tokenizer) ships registry data via plugins.
-datas += collect_data_files("tiktoken_ext", include_py_files=True)
-hiddenimports += ["tiktoken_ext", "tiktoken_ext.openai_public"]
 
 
 a = Analysis(
