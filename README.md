@@ -10,10 +10,13 @@ machine. No internet, no API keys, no data leaving your Mac.
 
 Named after the lyrebird, the bird famous for mimicking any sound it hears.
 
+Lyrebird is made by [Painted Birds](https://paintedbirds.xyz), a digital product
+studio based in Montevideo, Uruguay. Website: [lyrebird.paintedbirds.xyz](https://lyrebird.paintedbirds.xyz).
+
 ## Features
 
-- **Menu bar app** — a mic icon sits in the menu bar
-- **Tap the icon to start listening immediately** — a floating "pill" appears,
+- **Menu bar app**: a mic icon sits in the menu bar
+- **Tap the icon to start listening immediately**: a floating "pill" appears,
   pinned on top of every app, with an animated waveform
 - **Global hotkey**: `⇧⌘L` (Cmd+Shift+L) starts/stops listening from anywhere,
   no matter which app is focused
@@ -40,7 +43,7 @@ Named after the lyrebird, the bird famous for mimicking any sound it hears.
 ## Setup
 
 ```bash
-git clone https://github.com/painted-bird/lyrebird.git
+git clone https://github.com/paintedbirds/lyrebird.git
 cd lyrebird
 
 # 1. ffmpeg (for file uploads)
@@ -88,7 +91,7 @@ move the folder). Then search "Lyrebird" in Spotlight (`⌘Space`).
 
 Whisper commits to a single language per recording, so a mixed clip normally
 collapses into one language (and may even translate the other parts). To handle
-code-switching, this app — when **Language is set to Auto-detect** — splits the
+code-switching, this app, when **Language is set to Auto-detect**, splits the
 audio on natural pauses and detects + transcribes each phrase on its own. A
 sentence in English comes out in English; the next one in Spanish comes out in
 Spanish.
@@ -161,9 +164,9 @@ Transcribe file… feature.
 
 ## License
 
-[MIT](LICENSE) © 2026 Painted Bird.
+[MIT](LICENSE) © 2026 [Painted Birds](https://paintedbirds.xyz).
 
 The bundled [Arimo](fonts/) font is licensed under the SIL Open Font License
-1.1 — see [fonts/LICENSE-Arimo.txt](fonts/LICENSE-Arimo.txt). Speech recognition
+1.1. See [fonts/LICENSE-Arimo.txt](fonts/LICENSE-Arimo.txt). Speech recognition
 by [OpenAI Whisper](https://github.com/openai/whisper) (MIT) and
 [Silero VAD](https://github.com/snakers4/silero-vad) (MIT).
